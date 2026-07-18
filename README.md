@@ -1,5 +1,14 @@
 # ButlerV5
 
+A follow-bot ("butler") for [AdventureQuest Worlds](https://www.aq.com/) built as a
+compiled **[Skua](https://github.com/auqw/Skua) / [VibeSkua](https://github.com/NinjaXz/VibeSkua) plugin** (not a script). Every
+account running the plugin broadcasts its state to a shared file, so your accounts can
+see each other and follow or summon one another — a plugin-native take on the classic
+Butler v3 script, tuned to feel just as fast.
+
+> Client-side automation for your own AQW accounts. Use at your own risk and within
+> AQW's Terms of Service.
+
 ## Features
 
 - **Master / follower following** — start a follow from the follower's own window, or
