@@ -9,6 +9,8 @@ Butler v3 script, tuned to feel just as fast.
 > Client-side automation for your own AQW accounts. Use at your own risk and within
 > AQW's Terms of Service.
 
+<img width="540" height="470" alt="butlerv5final" src="https://github.com/user-attachments/assets/593b3169-c4c1-45ff-938e-d77b74b67c1b" />
+
 ## Features
 
 - **Master / follower following** — start a follow from the follower's own window, or
