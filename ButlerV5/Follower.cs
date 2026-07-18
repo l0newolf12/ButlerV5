@@ -1,0 +1,1162 @@
+using Skua.Core.Interfaces;
+using Skua.Core.Models.Players;
+using Skua.Core.Models.Skills;
+
+namespace ButlerV5;
+
+/// <summary>Live option accessors for the follower; values come from the plugin's options.</summary>
+public class FollowerSettings
+{
+    public required Func<bool> PassiveAttack { get; init; }
+    public required Func<int> GotoDelayMs { get; init; }
+    public required Func<int> RescueThreshold { get; init; }
+    public required Func<bool> LeechMode { get; init; }
+    public required Func<ParkSpot> Park { get; init; }
+    public required Func<bool> InstantWarnings { get; init; }
+    public required Func<bool> QuestBypasses { get; init; }
+    public required Func<string> CustomBypassIds { get; init; }
+    public required Func<bool> LevelFake { get; init; }
+    public required Func<bool> QuestClone { get; init; }
+    public required Func<bool> ScriptRunning { get; init; }
+
+    /// <summary>Use Skua's AntiLag (Lag Killer + animation cuts + hidden mobs) while summoned (Ordered).</summary>
+    public required Func<bool> AntiLagSummoned { get; init; }
+
+    /// <summary>Use Skua's AntiLag while manually following (Manual).</summary>
+    public required Func<bool> AntiLagFollowing { get; init; }
+
+    /// <summary>Called once when a script suspends the follow (shows the warning box).</summary>
+    public Action<string>? ScriptSuspendNotice { get; init; }
+}
+
+public enum FollowSource
+{
+    None,
+
+    /// <summary>User clicked Follow in this account's roster window.</summary>
+    Manual,
+
+    /// <summary>A master put this account in its followers= list.</summary>
+    Ordered,
+}
+
+/// <summary>
+/// Follows a master account. Core behavior is Butler v3's: rate-limited Goto plus a
+/// packet listener for "Locked zone" / "is full" / "ignoring goto" warnings. Where v3
+/// walked a hardcoded locked-maps list, v5 reads the master's sync file and joins the
+/// exact map-room directly.
+/// </summary>
+public class Follower
+{
+    private const int LoopDelayMs = 250;
+    private const int JumpMinIntervalMs = 500;
+    private const string ParkMap = "whitemap-100000";
+
+    private readonly IScriptInterface _bot;
+    private readonly FollowerSettings _settings;
+    private readonly Action<string> _log;
+
+    private CancellationTokenSource? _cts;
+    private Task? _loop;
+    private DateTime _lastGoto = DateTime.MinValue;
+    private DateTime _lastSnapshot = DateTime.MinValue;
+    private DateTime _lastJumpTime = DateTime.MinValue;
+    private DateTime _lastJoinTime = DateTime.MinValue;
+    private string? _lastJoinTarget;
+    private int _gotoAttempts;
+    private bool _packetStreamLogged;
+    private string? _skillClass;
+    private ClassUseMode _skillMode = ClassUseMode.Base;
+    private bool _skillsActive;
+    private string? _lastBypassMap;
+    private string? _lastPreApplyMap;
+    private DateTime _lastCloneFileTime = DateTime.MinValue;
+    private string? _lastRescueMap;
+    private int _rescueRounds;
+    private string? _blockedMap;
+    private int _roomFullAttempts;
+    private string? _fullCountRoom;  // the room we're currently counting full-warnings for
+    private string? _blockedRoom;    // a specific full room-instance we've parked on
+    private int _badReads;
+    private bool _suspended;
+    private bool _wasLoggedIn;
+    private bool? _lastWithMaster;
+    private volatile bool _parked;
+
+    private volatile bool _lockedZone;
+    private volatile bool _roomFull;
+    private volatile bool _gotoOff;
+    private volatile bool _isParking;
+    private bool _antiLagApplied;  // we turned AntiLag on for this follow, so we revert it on stop
+
+    /// <summary>True while mid-park (walking home) - the master shouldn't re-summon yet.</summary>
+    public bool IsParking => _isParking;
+
+    /// <summary>
+    /// True while parked and waiting (master offline or on a different server). The order
+    /// is still held - we're just idle at home, not actively following - so the master's
+    /// roster should show a "summoned" chip, not "following me".
+    /// </summary>
+    public bool IsParked => _parked;
+
+    public string? Master { get; private set; }
+    public FollowSource Source { get; private set; } = FollowSource.None;
+    public bool IsRunning => _loop is { IsCompleted: false };
+
+    /// <summary>
+    /// A master that turned out to be ignoring goto: orders from them are not obeyed
+    /// again until the user starts a follow manually (which clears this).
+    /// </summary>
+    public string? GotoBlockedMaster { get; private set; }
+
+    public Follower(IScriptInterface bot, FollowerSettings settings, Action<string> log)
+    {
+        _bot = bot;
+        _settings = settings;
+        _log = log;
+    }
+
+    public void Start(string master, FollowSource source)
+    {
+        Stop();
+
+        Master = master;
+        Source = source;
+        GotoBlockedMaster = null;
+        _suspended = false;
+        _parked = false;
+        _lastWithMaster = null;
+        _lastPreApplyMap = null;
+        _lastRescueMap = null;
+        _rescueRounds = 0;
+        _blockedMap = null;
+        _roomFullAttempts = 0;
+        _fullCountRoom = null;
+        _blockedRoom = null;
+        _lockedZone = _roomFull = _gotoOff = false;
+        DebugLog.Log("Follower", $"Start following {master} ({source})");
+
+        _cts = new CancellationTokenSource();
+        CancellationToken token = _cts.Token;
+
+        _bot.Events.ExtensionPacketReceived += PacketListener;
+        try { _bot.Flash.FlashCall += OnFlashCall; } catch { }
+        _packetStreamLogged = false;
+        DebugLog.Log("Follower",
+            $"options in THIS client: passiveAttack={_settings.PassiveAttack()} leech={_settings.LeechMode()} " +
+            $"park={_settings.Park()} gotoDelay={_settings.GotoDelayMs()}ms rescue={_settings.RescueThreshold()} " +
+            $"instantWarnings={_settings.InstantWarnings()} questBypass={_settings.QuestBypasses()} questClone={_settings.QuestClone()}");
+        _log($"Following {master} ({source}).");
+
+        _loop = Task.Run(() => Run(master, token), token);
+    }
+
+    public void Stop(bool park = false)
+    {
+        if (_cts == null)
+        {
+            Source = FollowSource.None;
+            return;
+        }
+
+        _bot.Events.ExtensionPacketReceived -= PacketListener;
+        try { _bot.Flash.FlashCall -= OnFlashCall; } catch { }
+        _cts.Cancel();
+        try { _loop?.Wait(3000); } catch { }
+        _cts.Dispose();
+        _cts = null;
+        _loop = null;
+
+        StopSkills();
+        StopAttacking(deaggroJump: true);
+        RevertAntiLag();
+        // Only park if we aren't already parked. Releasing a butler that's already
+        // parked (e.g. stuck on a different server) shouldn't kick off a second,
+        // slow house-join - it's already home.
+        if (park && !_parked)
+            Park("Released by master.");
+        else if (park)
+            DebugLog.Log("Follower", "released while already parked - staying put");
+
+        _log(Master != null ? $"Stopped following {Master}." : "Follow stopped.");
+        Master = null;
+        Source = FollowSource.None;
+    }
+
+    private void Run(string master, CancellationToken token)
+    {
+        try
+        {
+            Arm(master, freshLogin: false);
+            _wasLoggedIn = _bot.Player?.LoggedIn == true;
+
+            while (!token.IsCancellationRequested)
+            {
+                if (_bot.Player?.LoggedIn != true || !_bot.Player.Alive)
+                {
+                    // Track logout (not mere death) so we can re-arm on relogin.
+                    if (_bot.Player?.LoggedIn != true)
+                        _wasLoggedIn = false;
+                    Wait(token, 1000);
+                    continue;
+                }
+
+                // Auto-relogin re-arm: the skill engine, equipped class and quest
+                // state all die on disconnect. LoggedIn/Alive flip true a beat before
+                // the class/inventory finish loading, so re-arming instantly leaves the
+                // skill engine running with no real rotation (only skill 0). Wait for
+                // the character to actually settle, then re-arm with a class re-equip.
+                if (!_wasLoggedIn)
+                {
+                    _wasLoggedIn = true;
+                    DebugLog.Log("Follower", "re-login detected - waiting for character to load");
+                    WaitForCharacterReady(token);
+                    Arm(master, freshLogin: true);
+                }
+
+                // Suspend & resume: a script started on THIS client takes over the
+                // character; pause everything and resume when the script stops.
+                if (_settings.ScriptRunning())
+                {
+                    if (!_suspended)
+                    {
+                        _suspended = true;
+                        StopSkills();
+                        StopAttacking(deaggroJump: true);
+                        _log($"A script is running - following {master} is suspended until it stops.");
+                        DebugLog.Log("Follower", "suspended (script running in this client)");
+                        try { _settings.ScriptSuspendNotice?.Invoke(master); } catch { }
+                    }
+                    Wait(token, 1000);
+                    continue;
+                }
+                if (_suspended)
+                {
+                    _suspended = false;
+                    _gotoAttempts = 0;
+                    _log($"Script stopped - resuming follow of {master}.");
+                    DebugLog.Log("Follower", "resuming after script");
+                }
+
+                if (_gotoOff)
+                {
+                    _log($"{master} is ignoring goto requests (incognito mode?). Stopping follow.");
+                    break;
+                }
+
+                SyncData? m = SyncFile.ReadUser(master);
+
+                if ((DateTime.UtcNow - _lastSnapshot).TotalSeconds >= 10)
+                {
+                    _lastSnapshot = DateTime.UtcNow;
+
+                    // Re-clone when the master's quest file changed (they completed
+                    // something new mid-session).
+                    if (_settings.QuestClone())
+                    {
+                        DateTime fileTime = QuestClone.GetFileTime(master);
+                        if (fileTime > _lastCloneFileTime)
+                        {
+                            _lastCloneFileTime = fileTime;
+                            DebugLog.Log("QuestClone", $"{master}'s quest file changed - re-cloning");
+                            QuestClone.ApplyFromMaster(_bot, master);
+                        }
+                    }
+
+                    DebugLog.Log("Follower",
+                        $"tick: me map={_bot.Map?.Name} cell={_bot.Player?.Cell} pad={_bot.Player?.Pad} " +
+                        $"server={GameServer.CurrentName(_bot)} parked={_parked} " +
+                        $"flags locked={_lockedZone} full={_roomFull} gotoOff={_gotoOff} | master {DebugLog.Describe(m)}" +
+                        (m != null ? $" pidAlive={SyncFile.IsProcessAlive(m.Pid)}" : ""));
+                }
+
+                // Debounced: a single failed read (writer caught mid-rewrite) must not
+                // park the butler - require 3 consecutive bad reads (~3s).
+                if (m == null || !SyncFile.IsOnline(m))
+                {
+                    _badReads++;
+                    if (_badReads >= 3)
+                    {
+                        ParkOnce(m == null
+                            ? $"No ButlerV5 file for {master} at {SyncFile.PathFor(master)} - is their plugin installed?"
+                            : $"{master} looks offline (loggedin={(m.LoggedIn ? 1 : 0)}, pid={m.Pid}, " +
+                              $"pidAlive={SyncFile.IsProcessAlive(m.Pid)}). Parked, waiting for them to return.");
+                    }
+                    Wait(token, 1000);
+                    continue;
+                }
+                _badReads = 0;
+
+                if (!SameServer(m))
+                {
+                    ParkOnce($"{master} is on a different server (theirs='{m.Server}' mine='{GameServer.CurrentName(_bot)}'). Parked.");
+                    Wait(token, 2000);
+                    continue;
+                }
+
+                // Circuit breaker: a map we repeatedly failed to enter (entry gate kept
+                // bouncing us to battleon) is blocked until the master moves elsewhere.
+                if (_blockedMap != null)
+                {
+                    if (_blockedMap.Equals(m.Map, StringComparison.OrdinalIgnoreCase))
+                    {
+                        Wait(token, 2000);
+                        continue;
+                    }
+                    DebugLog.Log("Follower", $"master left blocked map {_blockedMap} - trying again");
+                    _blockedMap = null;
+                }
+
+                // A specific full room we gave up on. Unlike a locked map, ANY room change
+                // (even same map) frees us - the new room may have space.
+                if (_blockedRoom != null)
+                {
+                    if (_blockedRoom.Equals(m.MapWithRoom, StringComparison.OrdinalIgnoreCase))
+                    {
+                        Wait(token, 2000);
+                        continue;
+                    }
+                    DebugLog.Log("Follower", $"master left full room {_blockedRoom} - trying again");
+                    _blockedRoom = null;
+                }
+
+                if (_parked)
+                {
+                    _parked = false;
+                    _log($"{master} is back - resuming follow.");
+                    // Don't start skills here - we still have to travel to the master.
+                    // HandleCombat starts them on arrival (avoids the start-stop-start
+                    // that breaks Skua's skill engine).
+                }
+
+                if (_lockedZone || _roomFull)
+                {
+                    bool full = _roomFull;
+                    _lockedZone = _roomFull = false;
+
+                    // A full PRIVATE room (>=1000) used to be re-joined every tick forever:
+                    // unlike public rooms it never overflows, so the join is rejected outright
+                    // each time. Count the full-warnings for this specific room; after 3, stop
+                    // hammering and park until the master changes rooms (which may have space).
+                    if (full)
+                    {
+                        if (string.Equals(m.MapWithRoom, _fullCountRoom, StringComparison.OrdinalIgnoreCase))
+                            _roomFullAttempts++;
+                        else
+                        {
+                            _fullCountRoom = m.MapWithRoom;
+                            _roomFullAttempts = 1;
+                        }
+
+                        if (_roomFullAttempts >= 3)
+                        {
+                            _blockedRoom = m.MapWithRoom;
+                            _roomFullAttempts = 0;
+                            _fullCountRoom = null;
+                            ParkOnce($"{m.MapWithRoom} is full after 3 attempts - parked until {master} changes rooms.");
+                            Wait(token, 2000);
+                            continue;
+                        }
+                    }
+
+                    _log(full
+                        ? $"Room full - joining {m.MapWithRoom} directly (attempt {_roomFullAttempts})."
+                        : $"Locked zone - joining {m.MapWithRoom} from {master}'s file.");
+                    JoinMasterRoom(m);
+                    Wait(token, LoopDelayMs);
+                    continue;
+                }
+
+                // "Am I in the master's room?" - compare our own room title with the
+                // master's map-room from their file. Both come from the same game UI
+                // source, so this is an exact match. PlayerExists is NOT used for this:
+                // testing showed it flapping false while standing next to the master.
+                string myRoom = GetMyMapRoom();
+                if (string.IsNullOrEmpty(myRoom))
+                {
+                    // Own map still loading/transitioning - try again shortly.
+                    Wait(token, LoopDelayMs);
+                    continue;
+                }
+
+                // Re-check the per-map quest fakes whenever we land on a new map.
+                string myMapName = _bot.Map?.Name ?? "";
+                if (_settings.QuestBypasses() &&
+                    !string.Equals(myMapName, _lastBypassMap, StringComparison.OrdinalIgnoreCase))
+                {
+                    _lastBypassMap = myMapName;
+                    QuestBypass.ApplyForMap(_bot, myMapName);
+                }
+
+                bool sameRoom = string.Equals(myRoom, m.MapWithRoom, StringComparison.OrdinalIgnoreCase);
+                if (sameRoom != _lastWithMaster)
+                {
+                    _lastWithMaster = sameRoom;
+                    DebugLog.Log("Follower", $"room check: mine={myRoom} master={m.MapWithRoom} -> sameRoom={sameRoom}");
+                }
+
+                if (sameRoom)
+                {
+                    _rescueRounds = 0;
+                    _lastRescueMap = null;
+                    _roomFullAttempts = 0;
+                    _fullCountRoom = null;
+                }
+
+                if (!sameRoom)
+                {
+                    // Pause the skill engine while traveling: it re-acquires targets on
+                    // its own, dragging the butler back into combat and delaying the
+                    // goto for many seconds after the master leaves the map.
+                    if (_skillsActive)
+                    {
+                        DebugLog.Log("Follower", "pausing skill engine to travel");
+                        StopSkills();
+                    }
+                    StopAttacking(deaggroJump: true);
+
+                    // Entry gates are checked the moment you enter a map - faking after
+                    // landing is too late (doomvaultb black-screens and force-joins
+                    // battleon). Pre-apply the target map's fakes BEFORE moving, using
+                    // the goto-delay wait that exists anyway.
+                    if (_settings.QuestBypasses() &&
+                        !string.Equals(m.Map, _lastPreApplyMap, StringComparison.OrdinalIgnoreCase))
+                    {
+                        _lastPreApplyMap = m.Map;
+                        // Also counts as the on-arrival application: without this the
+                        // arrival backstop re-fakes the same map and the quest window
+                        // pops up twice (before and after the join).
+                        _lastBypassMap = m.Map;
+                        DebugLog.Log("Follower", $"pre-applying quest fakes for target map {m.Map}");
+                        QuestBypass.ApplyForMap(_bot, m.Map);
+                    }
+
+                    // Goto first, always - it reaches different maps, same-name room
+                    // changes AND player houses (which cannot be joined by map name).
+                    // Warning packets never reach a plugin (no running script pumps
+                    // them), so goto failure is detected by counting: several gotos
+                    // without landing in the master's room means goto is blocked
+                    // (locked zone, full room, ...) - then join map-room from the file.
+                    int rescueThreshold = Math.Clamp(_settings.RescueThreshold(), 1, 10);
+                    if (_gotoAttempts >= rescueThreshold)
+                    {
+                        _gotoAttempts = 0;
+
+                        if (string.Equals(m.Map, _lastRescueMap, StringComparison.OrdinalIgnoreCase))
+                            _rescueRounds++;
+                        else
+                        {
+                            _lastRescueMap = m.Map;
+                            _rescueRounds = 1;
+                        }
+
+                        if (_rescueRounds >= 3)
+                        {
+                            // Stop hammering, but tell apart a FULL ROOM from a LOCKED MAP.
+                            // /goto always blocks when the master's room is full; whether we
+                            // can still reach the MAP tells the two apart. A full PUBLIC room
+                            // (<1000) overflows the file-join onto the map in a different free
+                            // room - so we're ON the master's map but the wrong room. That's a
+                            // full room, and a ROOM change may free us, so block only this
+                            // room. (A full PRIVATE room >=1000 is rejected outright and is
+                            // handled by the _roomFull path above.) If we couldn't even get
+                            // onto the map - an entry gate bounced us to battleon - the map is
+                            // locked (a quest fake is missing); block the whole map until the
+                            // master leaves it.
+                            bool onMasterMap = string.Equals(_bot.Map?.Name ?? "", m.Map, StringComparison.OrdinalIgnoreCase);
+                            _rescueRounds = 0;
+                            if (onMasterMap)
+                            {
+                                _blockedRoom = m.MapWithRoom;
+                                ParkOnce($"{m.MapWithRoom} is full after 3 rescue attempts - parked until {master} changes rooms.");
+                            }
+                            else
+                            {
+                                _blockedMap = m.Map;
+                                ParkOnce($"Can't enter {m.Map} after 3 rescue attempts - a quest gate may be missing. Parked until {master} changes maps.");
+                            }
+                            Wait(token, 2000);
+                            continue;
+                        }
+
+                        DebugLog.Log("Follower", $"goto not landing after {rescueThreshold} attempts - file-join rescue (round {_rescueRounds})");
+                        JoinMasterRoom(m);
+                    }
+                    else if (TryGoto(master))
+                    {
+                        _gotoAttempts++;
+                    }
+                }
+                else if (_settings.LeechMode())
+                {
+                    _gotoAttempts = 0;
+
+                    // Leech mode: stay in the master's room but wait at Enter and
+                    // never fight. Good for dragging a weak alt along safely.
+                    if (_skillsActive)
+                        StopSkills();
+                    StopAttacking(deaggroJump: true);
+                    if (!string.Equals(_bot.Player!.Cell, "Enter", StringComparison.OrdinalIgnoreCase) &&
+                        (DateTime.UtcNow - _lastJumpTime).TotalMilliseconds >= JumpMinIntervalMs)
+                    {
+                        DebugLog.Log("Follower", $"leech: jump {_bot.Player.Cell} -> Enter/Spawn");
+                        _bot.Map!.Jump("Enter", "Spawn");
+                        _lastJumpTime = DateTime.UtcNow;
+                    }
+                }
+                else
+                {
+                    _gotoAttempts = 0;
+
+                    // Skill engine resume is handled by HandleCombat: it only runs
+                    // while the butler should actually be fighting.
+
+                    // In the master's room: only the CELL matters. Pads are ignored on
+                    // purpose - walking within a cell changes a player's pad, and
+                    // chasing those changes made the follower stutter-jump on every
+                    // move command. The master's pad is only used as the arrival pad.
+                    string targetCell = m.Cell;
+                    string targetPad = m.Pad;
+                    if (_bot.Map!.TryGetPlayer(master, out PlayerInfo? info) &&
+                        !string.IsNullOrEmpty(info?.Cell))
+                    {
+                        targetCell = info.Cell;
+                        targetPad = string.IsNullOrEmpty(info.Pad) ? m.Pad : info.Pad;
+                    }
+
+                    if (!string.Equals(_bot.Player!.Cell, targetCell, StringComparison.OrdinalIgnoreCase) &&
+                        (DateTime.UtcNow - _lastJumpTime).TotalMilliseconds >= JumpMinIntervalMs)
+                    {
+                        DebugLog.Log("Follower", $"jump {_bot.Player.Cell}/{_bot.Player.Pad} -> {targetCell}/{targetPad}");
+                        _bot.Map.Jump(targetCell, targetPad);
+                        _lastJumpTime = DateTime.UtcNow;
+                    }
+
+                    HandleCombat(m);
+                }
+
+                Wait(token, LoopDelayMs);
+            }
+        }
+        catch (Exception ex)
+        {
+            _log($"Follow loop error: {ex.Message}");
+        }
+        finally
+        {
+            // The loop can end without Stop() being called (gotoOff breaks out).
+            // Without this cleanup the UI keeps showing a dead follow, and an
+            // ORDERED follow gets restarted by the order watcher every 2s forever.
+            if (_gotoOff && Master != null)
+            {
+                GotoBlockedMaster = Master;
+                _bot.Events.ExtensionPacketReceived -= PacketListener;
+                try { _bot.Flash.FlashCall -= OnFlashCall; } catch { }
+                StopSkills();
+                StopAttacking();
+                _log($"{Master} won't be auto-followed until you press Follow manually (their goto is off).");
+                Master = null;
+                Source = FollowSource.None;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Prepares the character for following: equip class + start skills, apply custom
+    /// quest bypasses / level fake, and clone the master's quest state. Runs at follow
+    /// start and again on every relogin (all of this dies on a disconnect). On a fresh
+    /// login the class is re-equipped to force the client to reload its skill data.
+    /// </summary>
+    private void Arm(string master, bool freshLogin)
+    {
+        GameServer.LogCandidates(_bot); // diagnostic: which source has the server name
+        _skillsActive = false; // any prior engine died; SetupClassAndSkills re-starts it
+
+        SetupClassAndSkills(forceEquipCurrent: freshLogin);
+
+        if (_settings.QuestBypasses())
+            QuestBypass.ApplyCustom(_bot, QuestBypass.ParseCustomIds(_settings.CustomBypassIds()));
+        if (_settings.LevelFake())
+            QuestBypass.ApplyLevelFake(_bot);
+        _lastBypassMap = null;
+        _lastPreApplyMap = null;
+
+        if (_settings.QuestClone())
+        {
+            QuestClone.ApplyFromMaster(_bot, master);
+            _lastCloneFileTime = QuestClone.GetFileTime(master);
+        }
+
+        ApplyAntiLag();
+    }
+
+    /// <summary>
+    /// Turns Skua's AntiLag on if the option for this follow's source is enabled. Called
+    /// from Arm(), so it re-applies after a relogin too (the Flash-side toggles reset on a
+    /// game reload). Only touches AntiLag when the matching option is on - it never fights
+    /// a user who has enabled Lag Killer by hand for a source we aren't asked to manage.
+    /// </summary>
+    private void ApplyAntiLag()
+    {
+        bool want = (Source == FollowSource.Ordered && _settings.AntiLagSummoned())
+                 || (Source == FollowSource.Manual && _settings.AntiLagFollowing());
+        if (!want)
+            return;
+
+        SetAntiLag(true);
+        if (!_antiLagApplied)
+        {
+            _antiLagApplied = true;
+            DebugLog.Log("Follower", $"AntiLag ON (source={Source})");
+        }
+    }
+
+    private void RevertAntiLag()
+    {
+        if (!_antiLagApplied)
+            return;
+        _antiLagApplied = false;
+        SetAntiLag(false);
+        DebugLog.Log("Follower", "AntiLag OFF (follow stopped)");
+    }
+
+    /// <summary>The exact bundle CoreBots' AntiLag uses: Lag Killer, the Lite animation
+    /// cuts, and hidden monster visuals.</summary>
+    private void SetAntiLag(bool on)
+    {
+        try
+        {
+            _bot.Options.LagKiller = on;
+            _bot.Lite.FreezeMonsterPosition = on;
+            _bot.Lite.DisableMonsterAnimation = on;
+            _bot.Lite.DisableDamageStrobe = on;
+            _bot.Lite.DisableSelfAnimation = on;
+            _bot.Lite.DisableWeaponAnimation = on;
+            _bot.Lite.DisableSkillAnimation = on;
+            _bot.Lite.DisableAuraAnimations = on;
+
+            // Hide/show monster visuals. world.toggleMonsters is a TOGGLE, so only flip it
+            // when the current state doesn't match; redX.visible is true when hidden.
+            bool hidden = _bot.Flash.GetGameObject<bool>("ui.monsterIcon.redX.visible");
+            if (hidden != on)
+                _bot.Flash.CallGameFunction("world.toggleMonsters");
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Log("Follower", $"AntiLag set {on} failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Equips the CoreBots Farm/Solo class configured for this account (if any) and
+    /// starts Skua's skill engine for it - the same StartAdvanced call CoreBots makes,
+    /// which is where Butler v3's skill usage actually came from. Without this the
+    /// butler only ever auto-attacks (skill 0).
+    /// </summary>
+    private void SetupClassAndSkills(bool forceEquipCurrent)
+    {
+        try
+        {
+            string? me = _bot.Player?.Username;
+            if (string.IsNullOrEmpty(me))
+                return;
+
+            _skillClass = null;
+            _skillMode = ClassUseMode.Base;
+
+            ButlerClassType type = AccountConfig.GetClassType(me);
+            string? classToEquip = null;
+
+            if (type != ButlerClassType.None)
+            {
+                classToEquip = AccountConfig.GetCboClassName(me, type);
+                if (string.IsNullOrEmpty(classToEquip))
+                    _log($"No CoreBots {type} class configured for {me} - keeping current class.");
+                else if (Enum.TryParse(AccountConfig.GetCboClassMode(me, type), ignoreCase: true, out ClassUseMode mode))
+                    _skillMode = mode;
+            }
+            else if (forceEquipCurrent)
+            {
+                // No configured class: after a relogin, re-equip whatever's currently
+                // worn to force the client to reload the class's skill data (without
+                // this the skill engine starts with no rotation - only skill 0 fires).
+                classToEquip = _bot.Player?.CurrentClass?.Name;
+            }
+
+            if (!string.IsNullOrEmpty(classToEquip))
+            {
+                _log($"Equipping class: {classToEquip}");
+                _bot.Inventory.EquipItem(classToEquip);
+                Thread.Sleep(1500); // let the equip + skill data settle
+                _skillClass = classToEquip;
+            }
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Log("Follower", $"class equip failed: {ex.Message}");
+        }
+
+        // NOTE: skills are NOT started here. Skua's auto-skill engine breaks if it's
+        // started, stopped, then started again within a few seconds - which is exactly
+        // what happens if we start skills now and then immediately pause to travel to
+        // the master. Skills start lazily in HandleCombat, only once we're in the
+        // master's room and actually fighting, so there's no rapid start-stop-start.
+    }
+
+    /// <summary>Waits (bounded) for the character to finish loading after a relogin.</summary>
+    private void WaitForCharacterReady(CancellationToken token)
+    {
+        for (int i = 0; i < 40 && !token.IsCancellationRequested; i++) // up to ~10s
+        {
+            try
+            {
+                if (_bot.Player?.LoggedIn == true && _bot.Player.Alive &&
+                    _bot.Map?.Loaded == true &&
+                    !string.IsNullOrEmpty(_bot.Player.CurrentClass?.Name))
+                    break;
+            }
+            catch
+            {
+            }
+            Wait(token, 250);
+        }
+        DebugLog.Log("Follower", $"character ready: class={_bot.Player?.CurrentClass?.Name} map={_bot.Map?.Name} loaded={_bot.Map?.Loaded}");
+    }
+
+    private void StartSkills()
+    {
+        try
+        {
+            string skillClass = _skillClass ?? _bot.Player?.CurrentClass?.Name ?? "generic";
+            DebugLog.Log("Follower", $"starting skill engine: {skillClass} ({_skillMode})");
+            _bot.Skills.StartAdvanced(skillClass, false, _skillMode);
+            _skillsActive = true;
+            DebugLog.Log("Follower", $"skill engine armed: TimerRunning={_bot.Skills.TimerRunning}");
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Log("Follower", $"skill engine start failed: {ex.Message}");
+        }
+    }
+
+    private void StopSkills()
+    {
+        try
+        {
+            _bot.Skills.Stop();
+            DebugLog.Log("Follower", $"skill engine stopped (timer still running: {_bot.Skills.TimerRunning})");
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Log("Follower", $"skill engine stop failed: {ex.Message}");
+        }
+        _skillsActive = false;
+    }
+
+    /// <summary>
+    /// EXPERIMENTAL instant warning detection: plugins never get ExtensionPacketReceived
+    /// (no running script pumps it), but the raw flash-call stream fires regardless.
+    /// String-matching the raw packet text gives v3-style immediate locked-zone /
+    /// room-full / ignoring-goto reactions.
+    /// </summary>
+    private void OnFlashCall(string function, object[] args)
+    {
+        try
+        {
+            if (!_settings.InstantWarnings())
+                return;
+            // Server->client packets (where warnings arrive) come in under "pext";
+            // "packet" is the outgoing client-command stream and never has warnings.
+            if (!string.Equals(function, "pext", StringComparison.OrdinalIgnoreCase))
+                return;
+
+            if (!_packetStreamLogged)
+            {
+                _packetStreamLogged = true;
+                DebugLog.Log("Follower", "instant warnings: packet stream active");
+            }
+
+            if (args is not { Length: > 0 })
+                return;
+            string text = string.Join(" ", args.Select(a => a?.ToString() ?? ""));
+            if (text.Length == 0)
+                return;
+
+            if (text.Contains("a Locked zone.", StringComparison.OrdinalIgnoreCase) ||
+                text.Contains("is not available.", StringComparison.OrdinalIgnoreCase))
+            {
+                _lockedZone = true;
+                DebugLog.Log("Follower", "instant warning: locked zone / not available");
+            }
+
+            if (text.Contains("is full", StringComparison.OrdinalIgnoreCase))
+            {
+                _roomFull = true;
+                DebugLog.Log("Follower", "instant warning: room full");
+            }
+
+            if (text.Contains("ignoring goto", StringComparison.OrdinalIgnoreCase))
+            {
+                _gotoOff = true;
+                DebugLog.Log("Follower", "instant warning: ignoring goto");
+            }
+        }
+        catch
+        {
+        }
+    }
+
+    private void HandleCombat(SyncData master)
+    {
+        try
+        {
+            bool shouldAttack = !_settings.PassiveAttack() || master.Attacking;
+
+            if (shouldAttack)
+            {
+                if (!_skillsActive)
+                    StartSkills();
+                _bot.Combat.Attack("*");
+            }
+            else
+            {
+                // Pause skills BEFORE dropping the target: a running skill engine
+                // re-acquires targets on its own, causing an endless cancel →
+                // deaggro-jump → re-aggro flicker during passive idle.
+                if (_skillsActive)
+                {
+                    DebugLog.Log("Follower", "pausing skill engine (passive idle)");
+                    StopSkills();
+                }
+                StopAttacking(deaggroJump: true);
+            }
+        }
+        catch
+        {
+        }
+    }
+
+    /// <param name="deaggroJump">
+    /// Also rejoin the current cell - canceling the target alone leaves monsters
+    /// aggro'd and beating on the butler; a same-cell jump resets that (v4's
+    /// QuickDeaggro trick).
+    /// </param>
+    private void StopAttacking(bool deaggroJump = false)
+    {
+        try
+        {
+            bool wasFighting = _bot.Player?.HasTarget == true || _bot.Player?.InCombat == true;
+            if (!wasFighting)
+                return;
+
+            // Both are needed: CancelTarget alone leaves the auto-attack engaged and
+            // the client immediately re-targets.
+            _bot.Combat.CancelAutoAttack();
+            _bot.Combat.CancelTarget();
+
+            if (deaggroJump)
+            {
+                DebugLog.Log("Follower", "same-cell rejoin to drop monster aggro");
+                _bot.Map!.Jump(_bot.Player?.Cell ?? "Enter", _bot.Player?.Pad ?? "Spawn");
+            }
+        }
+        catch
+        {
+        }
+    }
+
+    /// <returns>true if a goto was actually sent (not rate-limited).</returns>
+    private bool TryGoto(string master)
+    {
+        // Default (250ms) = the loop tick, so out-of-room goto fires every tick like
+        // Butler v3; the setting is the throttle for anyone who wants it gentler.
+        int delayMs = Math.Clamp(_settings.GotoDelayMs(), 0, 60000);
+        if ((DateTime.UtcNow - _lastGoto).TotalMilliseconds < delayMs)
+            return false;
+
+        _lastGoto = DateTime.UtcNow;
+        try
+        {
+            DebugLog.Log("Follower", $"goto {master} (my map={_bot.Map?.Name})");
+            _bot.Player.Goto(master);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Log("Follower", $"goto failed: {ex.Message}");
+            return false;
+        }
+    }
+
+    private void JoinMasterRoom(SyncData m)
+    {
+        // One join attempt per target per 5s. Re-joining every loop tick keeps
+        // reloading the room, which looks like stuttering and can prevent the
+        // transfer from ever completing.
+        if (string.Equals(m.MapWithRoom, _lastJoinTarget, StringComparison.OrdinalIgnoreCase) &&
+            (DateTime.UtcNow - _lastJoinTime).TotalMilliseconds < 5000)
+            return;
+
+        _lastJoinTarget = m.MapWithRoom;
+        _lastJoinTime = DateTime.UtcNow;
+
+        try
+        {
+            DebugLog.Log("Follower", $"join {m.MapWithRoom} cell={m.Cell} pad={m.Pad} (from map={_bot.Map?.Name})");
+            StopAttacking();
+            // ignoreCheck: Skua skips joins to a map with the same name, which
+            // breaks room-number changes like yulgar-1 -> yulgar-9123.
+            _bot.Map!.Join(m.MapWithRoom, m.Cell, m.Pad, ignoreCheck: true);
+            _bot.Wait.ForMapLoad(m.Map);
+            DebugLog.Log("Follower", $"join done, now on map={_bot.Map?.Name} loaded={_bot.Map?.Loaded}");
+        }
+        catch (Exception ex)
+        {
+            _log($"Join {m.MapWithRoom} failed: {ex.Message}");
+            DebugLog.Log("Follower", $"join {m.MapWithRoom} FAILED: {ex}");
+        }
+    }
+
+    private void ParkOnce(string reason)
+    {
+        if (_parked)
+            return;
+        _parked = true;
+        Park(reason);
+    }
+
+    private void Park(string reason)
+    {
+        _isParking = true; // broadcast so the master's window keeps Summon disabled until home
+        try
+        {
+            _log(reason);
+            DebugLog.Log("Follower", $"PARK: {reason}");
+            StopSkills();
+            StopAttacking(deaggroJump: true);
+
+            ParkSpot spot = _settings.Park();
+            if (spot == ParkSpot.Stay)
+            {
+                DebugLog.Log("Follower", "park mode Stay - not moving");
+                return;
+            }
+
+            // Already where we'd park? Don't re-transfer. Prevents repeated house-joins
+            // when the master hops servers while we're already parked at home.
+            string already = GetMyMapRoom();
+            if (spot == ParkSpot.House && already.StartsWith("house-", StringComparison.OrdinalIgnoreCase))
+            {
+                DebugLog.Log("Follower", "already home - park is a no-op");
+                return;
+            }
+            if (spot == ParkSpot.Whitemap && already.StartsWith("whitemap-", StringComparison.OrdinalIgnoreCase))
+            {
+                DebugLog.Log("Follower", "already at whitemap - park is a no-op");
+                return;
+            }
+
+            // The server rejects house joins (and can reject map joins) while in
+            // combat - this is how "parking" used to end up in whitemap. Give the
+            // combat state a moment to drop after the deaggro jump.
+            for (int i = 0; i < 12 && _bot.Player?.InCombat == true; i++)
+                Thread.Sleep(250);
+            if (_bot.Player?.InCombat == true)
+                DebugLog.Log("Follower", "still flagged in-combat after 3s - parking anyway");
+
+            // Park at home: join own house when one is placed, whitemap otherwise.
+            try
+            {
+                if (spot == ParkSpot.House &&
+                    _bot.Player?.LoggedIn == true &&
+                    _bot.House?.Items?.Any(h => h.Equipped) == true)
+                {
+                    DebugLog.Log("Follower", "parking in own house");
+                    string roomBefore = GetMyMapRoom();
+
+                    // The server enforces a "too soon after combat" cooldown on house
+                    // joins that outlives the in-combat flag by several seconds, and
+                    // the transfer itself can take a while. Retry across the cooldown;
+                    // we're home once we're in a "house" map that isn't the room we
+                    // started in (release can happen inside the master's house).
+                    // The post-combat cooldown almost always eats an immediate attempt;
+                    // waiting 3s first usually makes attempt 1 the one that lands.
+                    Thread.Sleep(3000);
+
+                    for (int attempt = 1; attempt <= 3; attempt++)
+                    {
+                        _bot.Send.Packet($"%xt%zm%house%1%{_bot.Player.Username}%");
+
+                        for (int i = 0; i < 24; i++)
+                        {
+                            Thread.Sleep(250);
+                            string current = GetMyMapRoom();
+                            if (current.StartsWith("house-", StringComparison.OrdinalIgnoreCase) &&
+                                !current.Equals(roomBefore, StringComparison.OrdinalIgnoreCase))
+                            {
+                                DebugLog.Log("Follower", $"parked in own house ({current}, attempt {attempt})");
+                                return;
+                            }
+                        }
+
+                        if (attempt < 3)
+                        {
+                            DebugLog.Log("Follower", $"house join attempt {attempt} didn't land (post-combat cooldown?) - retrying in 5s");
+                            Thread.Sleep(5000);
+                        }
+                    }
+
+                    // 3 attempts failed. If we're STILL flagged in combat, this is almost
+                    // certainly an auto-aggro room: the same-cell deaggro jump can't shed it,
+                    // so every house join is rejected. Jump to Enter/Spawn (present in every
+                    // map, usually monster-free) to drop aggro, then try the join once more.
+                    if (_bot.Player?.InCombat == true)
+                    {
+                        DebugLog.Log("Follower", "still in combat after 3 house attempts - jumping to Enter/Spawn to shed aggro");
+                        try { _bot.Map!.Jump("Enter", "Spawn"); } catch { }
+                        for (int i = 0; i < 12 && _bot.Player?.InCombat == true; i++)
+                            Thread.Sleep(250);
+
+                        // Aggro is shed now, but the house-join cooldown outlives the combat
+                        // flag by several seconds - a join right here gets rejected and drops
+                        // us to whitemap. Wait the cooldown out, then retry once.
+                        Thread.Sleep(4000);
+                        _bot.Send.Packet($"%xt%zm%house%1%{_bot.Player!.Username}%");
+                        for (int i = 0; i < 24; i++)
+                        {
+                            Thread.Sleep(250);
+                            string current = GetMyMapRoom();
+                            if (current.StartsWith("house-", StringComparison.OrdinalIgnoreCase) &&
+                                !current.Equals(roomBefore, StringComparison.OrdinalIgnoreCase))
+                            {
+                                DebugLog.Log("Follower", $"parked in own house ({current}, after Enter/Spawn deaggro)");
+                                return;
+                            }
+                        }
+                    }
+
+                    // Still in a house (probably were in one when the packet was sent,
+                    // possibly our own)? A house is a safe park - don't yank to whitemap.
+                    if (GetMyMapRoom().StartsWith("house-", StringComparison.OrdinalIgnoreCase))
+                    {
+                        DebugLog.Log("Follower", "already in a house - staying parked here");
+                        return;
+                    }
+                    DebugLog.Log("Follower", "house join didn't land after 7s, falling back to whitemap");
+                }
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Log("Follower", $"house park failed: {ex.Message}");
+            }
+
+            _bot.Map!.Join(ParkMap);
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Log("Follower", $"park failed: {ex.Message}");
+        }
+        finally
+        {
+            _isParking = false;
+        }
+    }
+
+    /// <summary>
+    /// Our own "map-room" in the same format the broadcaster writes (name lowercased,
+    /// room parsed from the game UI's room title). Empty while the map is loading.
+    /// </summary>
+    private string GetMyMapRoom()
+    {
+        try
+        {
+            if (_bot.Map?.Loaded != true)
+                return "";
+
+            string name = _bot.Map.Name?.ToLowerInvariant() ?? "";
+            if (string.IsNullOrEmpty(name) || name == "-1")
+                return "";
+
+            string fullName = _bot.Map.FullName ?? "";
+            int dash = fullName.LastIndexOf('-');
+            if (dash > 0 && dash < fullName.Length - 1)
+            {
+                string room = fullName[(dash + 1)..];
+                if (room.All(char.IsDigit))
+                    return $"{name}-{room}";
+            }
+            return "";
+        }
+        catch
+        {
+            return "";
+        }
+    }
+
+    private bool SameServer(SyncData m)
+    {
+        string myServer = GameServer.CurrentName(_bot); // name, not IP - sock7 is shared across worlds
+        return string.IsNullOrEmpty(m.Server) ||
+               string.Equals(m.Server, myServer, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void Wait(CancellationToken token, int ms) => token.WaitHandle.WaitOne(ms);
+
+    /// <summary>Same server warnings Butler v3 reacts to, minus the locked-maps list.</summary>
+    private void PacketListener(dynamic packet)
+    {
+        try
+        {
+            if (packet == null)
+                return;
+
+            dynamic? paramsObj = packet["params"];
+            if (paramsObj is null)
+                return;
+            if (paramsObj!.type != "str")
+                return;
+
+            dynamic? dataObj = paramsObj!.dataObj;
+            if (dataObj == null)
+                return;
+
+            string? cmd = dataObj[0];
+            if (string.IsNullOrEmpty(cmd))
+                return;
+
+            if (cmd == "server")
+            {
+                string? text = dataObj[2]?.ToString();
+                if (!string.IsNullOrWhiteSpace(text) &&
+                    text.Contains("is ignoring goto requests", StringComparison.OrdinalIgnoreCase))
+                    _gotoOff = true;
+            }
+            else if (cmd == "warning")
+            {
+                string chat = Convert.ToString(packet) ?? "";
+
+                if (chat.Contains("a Locked zone.", StringComparison.OrdinalIgnoreCase) ||
+                    chat.Contains("is not available.", StringComparison.OrdinalIgnoreCase))
+                {
+                    _lockedZone = true;
+                    DebugLog.Log("Follower", "warning packet: locked zone / not available");
+                }
+
+                if (chat.Contains("is full", StringComparison.OrdinalIgnoreCase))
+                {
+                    _roomFull = true;
+                    DebugLog.Log("Follower", "warning packet: room full");
+                }
+
+                if (chat.Contains("ignoring goto", StringComparison.OrdinalIgnoreCase))
+                {
+                    _gotoOff = true;
+                    DebugLog.Log("Follower", "warning packet: ignoring goto");
+                }
+            }
+        }
+        catch
+        {
+        }
+    }
+}
