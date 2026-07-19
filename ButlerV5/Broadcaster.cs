@@ -83,9 +83,17 @@ public class Broadcaster
                     if (enabled != _wasEnabled)
                     {
                         _wasEnabled = enabled;
-                        DebugLog.Log("Broadcaster", $"broadcast option flipped -> {enabled}");
+                        DebugLog.Log("Broadcaster", $"ButlerV5 enabled -> {enabled}");
                         if (!enabled)
-                            WriteOffline(); // stop advertising a ghost when user turns broadcasting off
+                            WriteOffline(); // master switch off: mark offline, then go idle
+                    }
+
+                    // Master switch off: write nothing at all (no sync file, no quest
+                    // publish) until it's turned back on.
+                    if (!enabled)
+                    {
+                        token.WaitHandle.WaitOne(250);
+                        continue;
                     }
 
                     bool loggedIn = _bot.Player?.LoggedIn == true;

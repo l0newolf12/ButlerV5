@@ -229,6 +229,60 @@ public static class QuestClone
         }
     }
 
+    /// <summary>
+    /// The highest-value character in AQW's quest encoding. Per DecodeChar the ranges are
+    /// '0'-'9' (0-9), 'A'-'Z' (10-35), 'a'-'z' (36-61) - so lowercase is the TOP range and
+    /// 'z' = 61 is the true max. (Grimoire's "Maid" uses 'Z', which is only 35 here.) 'z' is
+    /// also the max under plain base-36, so it's the safe choice either way.
+    /// </summary>
+    private const char MaxQuestChar = 'z';
+
+    /// <summary>
+    /// Nuclear bypass ("unlock all quests"): overwrite every quest slot with the max value
+    /// client-side, so every quest-locked cell/mob/map opens without cloning or a per-map
+    /// table. Length is preserved per string (the slot index IS the character position, so
+    /// changing length would corrupt everything). Client-side only - the server restores
+    /// the real values on relogin.
+    /// </summary>
+    public static void UnlockAll(IScriptInterface bot)
+    {
+        try
+        {
+            if (bot.Player?.LoggedIn != true || bot.Map?.Loaded != true)
+                return;
+
+            Dictionary<string, string>? strings = null;
+            try { strings = ExtractQuestStrings(bot.Flash.GetGameObject("world.myAvatar.objData")); }
+            catch { }
+            if (strings == null || strings.Count == 0)
+            {
+                DebugLog.Log("QuestClone", "unlock-all: objData quest strings not readable yet - skipping");
+                return;
+            }
+
+            int maxed = 0;
+            foreach ((string field, string value) in strings)
+            {
+                if (value.Length == 0)
+                    continue;
+                try
+                {
+                    bot.Flash.SetGameObject($"world.myAvatar.objData.{field}", new string(MaxQuestChar, value.Length));
+                    maxed++;
+                }
+                catch (Exception ex)
+                {
+                    DebugLog.Log("QuestClone", $"unlock-all SetGameObject({field}) failed: {ex.Message}");
+                }
+            }
+            DebugLog.Log("QuestClone", $"unlocked all quests (client-side, {maxed} strings maxed to '{MaxQuestChar}')");
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Log("QuestClone", $"unlock-all failed: {ex.Message}");
+        }
+    }
+
     private static Dictionary<string, string>? ExtractQuestStrings(string? json)
     {
         if (string.IsNullOrEmpty(json))

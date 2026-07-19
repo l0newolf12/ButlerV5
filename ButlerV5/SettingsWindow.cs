@@ -297,7 +297,26 @@ public class SettingsWindow : CustomWindow
             bool value = raw.Equals("True", StringComparison.OrdinalIgnoreCase) || raw == "1";
             CheckBox cb = new() { IsChecked = value };
             cb.Checked += (_, _) => _plugin.SaveSetting(option.Name, true);
-            cb.Unchecked += (_, _) => _plugin.SaveSetting(option.Name, false);
+
+            if (option.Name == "enabled")
+            {
+                // Master switch: confirm before disabling the whole plugin; revert if declined.
+                cb.Unchecked += (s, _) =>
+                {
+                    MessageBoxResult r = MessageBox.Show(
+                        "Turning this off stops ButlerV5 from working on ALL accounts - no following, " +
+                        "summoning, or broadcasting until you turn it back on.\n\nDisable ButlerV5?",
+                        "ButlerV5", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+                    if (r == MessageBoxResult.Yes)
+                        _plugin.SaveSetting(option.Name, false);
+                    else
+                        ((CheckBox)s).IsChecked = true; // revert (re-fires Checked -> re-saves true, harmless)
+                };
+            }
+            else
+            {
+                cb.Unchecked += (_, _) => _plugin.SaveSetting(option.Name, false);
+            }
             return cb;
         }
 

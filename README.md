@@ -58,13 +58,16 @@ Launch Skua and open the **Butler V5** window from the plugin menu.
 > running script. Plugin-only butlers need it enabled manually in Skua's game settings
 > to recover from disconnects.
 
+> **Skua's Auto Attack/Hunt:** while an account is following, the plugin keeps Skua's
+> built-in Auto Attack/Hunt turned off — it manages combat and skills itself, and running
+> both fights for control. Don't rely on Auto on a butler; the plugin turns it off for you.
+
 ## Options
 
 Set globally (and, for class type, per account) in the plugin's settings window.
 
 | Option | Default | Notes |
 |---|---|---|
-| Enable broadcasting | On | Write this account's status file so others can see/follow it. |
 | Only attack when master attacks | Off | Passive: only fight while the master fights. |
 | AntiLag while summoned | On | Skua AntiLag while summoned (Ordered follow). |
 | Enable debug logs | On | Record diagnostics to the in-app log viewer. |
@@ -79,9 +82,11 @@ Set globally (and, for class type, per account) in the plugin's settings window.
 | Quest bypasses (UpdateQuest) | On | Client-side fake gate quests on known maps. |
 | Custom bypass quest IDs | (empty) | Extra quest IDs to fake. |
 | Clone master quest state | On | Experimental client-side quest-state clone (merge-max). |
+| Unlock all quests | On | Experimental "nuclear" bypass: maxes every quest slot client-side so all quest-gated content opens. Overrides clone + bypasses; restored on relogin. |
 | Fake level 100 | Off | Client-side level display for level-gated maps. |
 | Instant warning detection | On | Reads raw packets for locked/full-room warnings. |
 | AntiLag while following | Off | Skua AntiLag while manually following (Manual follow). |
+| Enable ButlerV5 | On | **Global master switch.** Off = the entire plugin stops on every account (no broadcasting/following/summoning) until turned back on. Prompts for confirmation. |
 
 ## How it works
 

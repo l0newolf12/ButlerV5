@@ -17,6 +17,9 @@ public class FollowerSettings
     public required Func<string> CustomBypassIds { get; init; }
     public required Func<bool> LevelFake { get; init; }
     public required Func<bool> QuestClone { get; init; }
+
+    /// <summary>Nuclear bypass: max every quest slot client-side. Supersedes QuestClone and QuestBypasses.</summary>
+    public required Func<bool> UnlockAllQuests { get; init; }
     public required Func<bool> ScriptRunning { get; init; }
 
     /// <summary>Use Skua's AntiLag (Lag Killer + animation cuts + hidden mobs) while summoned (Ordered).</summary>
@@ -88,6 +91,7 @@ public class Follower
     private volatile bool _gotoOff;
     private volatile bool _isParking;
     private bool _antiLagApplied;  // we turned AntiLag on for this follow, so we revert it on stop
+    private bool _autoStopLogged;  // logged the "stopped Skua Auto" notice once per on->off transition
 
     /// <summary>True while mid-park (walking home) - the master shouldn't re-summon yet.</summary>
     public bool IsParking => _isParking;
@@ -238,6 +242,10 @@ public class Follower
                     DebugLog.Log("Follower", "resuming after script");
                 }
 
+                // Keep Skua's Auto Attack/Hunt off for the whole follow (best-effort mirror
+                // of Skua's "no Auto while a script runs"). Cheap bool read per tick.
+                StopUserAuto();
+
                 if (_gotoOff)
                 {
                     _log($"{master} is ignoring goto requests (incognito mode?). Stopping follow.");
@@ -251,8 +259,9 @@ public class Follower
                     _lastSnapshot = DateTime.UtcNow;
 
                     // Re-clone when the master's quest file changed (they completed
-                    // something new mid-session).
-                    if (_settings.QuestClone())
+                    // something new mid-session). Skipped when "unlock all" is on - our
+                    // slots are already maxed, so there's nothing to pick up.
+                    if (!_settings.UnlockAllQuests() && _settings.QuestClone())
                     {
                         DateTime fileTime = QuestClone.GetFileTime(master);
                         if (fileTime > _lastCloneFileTime)
@@ -379,13 +388,17 @@ public class Follower
                     continue;
                 }
 
-                // Re-check the per-map quest fakes whenever we land on a new map.
+                // Re-apply quest access whenever we land on a new map (beats entry gates).
+                // "Unlock all" re-maxes; otherwise the per-map bypass runs.
                 string myMapName = _bot.Map?.Name ?? "";
-                if (_settings.QuestBypasses() &&
+                if ((_settings.UnlockAllQuests() || _settings.QuestBypasses()) &&
                     !string.Equals(myMapName, _lastBypassMap, StringComparison.OrdinalIgnoreCase))
                 {
                     _lastBypassMap = myMapName;
-                    QuestBypass.ApplyForMap(_bot, myMapName);
+                    if (_settings.UnlockAllQuests())
+                        QuestClone.UnlockAll(_bot);
+                    else
+                        QuestBypass.ApplyForMap(_bot, myMapName);
                 }
 
                 bool sameRoom = string.Equals(myRoom, m.MapWithRoom, StringComparison.OrdinalIgnoreCase);
@@ -419,7 +432,9 @@ public class Follower
                     // landing is too late (doomvaultb black-screens and force-joins
                     // battleon). Pre-apply the target map's fakes BEFORE moving, using
                     // the goto-delay wait that exists anyway.
-                    if (_settings.QuestBypasses() &&
+                    // "Unlock all" keeps every slot maxed persistently, so the target-map
+                    // gate is already beaten on arrival - no target-specific pre-apply needed.
+                    if (!_settings.UnlockAllQuests() && _settings.QuestBypasses() &&
                         !string.Equals(m.Map, _lastPreApplyMap, StringComparison.OrdinalIgnoreCase))
                     {
                         _lastPreApplyMap = m.Map;
@@ -570,21 +585,33 @@ public class Follower
     private void Arm(string master, bool freshLogin)
     {
         GameServer.LogCandidates(_bot); // diagnostic: which source has the server name
+        StopUserAuto(); // butler owns combat/skills - kill any user Auto Attack/Hunt first
         _skillsActive = false; // any prior engine died; SetupClassAndSkills re-starts it
 
         SetupClassAndSkills(forceEquipCurrent: freshLogin);
 
-        if (_settings.QuestBypasses())
-            QuestBypass.ApplyCustom(_bot, QuestBypass.ParseCustomIds(_settings.CustomBypassIds()));
+        // Level fake is independent of quest access.
         if (_settings.LevelFake())
             QuestBypass.ApplyLevelFake(_bot);
         _lastBypassMap = null;
         _lastPreApplyMap = null;
 
-        if (_settings.QuestClone())
+        // Quest access precedence: "unlock all" is the nuclear option and supersedes both
+        // the clone and the per-map bypass (it maxes every slot, so those would just be
+        // overwritten). Only one path runs.
+        if (_settings.UnlockAllQuests())
         {
-            QuestClone.ApplyFromMaster(_bot, master);
-            _lastCloneFileTime = QuestClone.GetFileTime(master);
+            QuestClone.UnlockAll(_bot);
+        }
+        else
+        {
+            if (_settings.QuestBypasses())
+                QuestBypass.ApplyCustom(_bot, QuestBypass.ParseCustomIds(_settings.CustomBypassIds()));
+            if (_settings.QuestClone())
+            {
+                QuestClone.ApplyFromMaster(_bot, master);
+                _lastCloneFileTime = QuestClone.GetFileTime(master);
+            }
         }
 
         ApplyAntiLag();
@@ -687,8 +714,35 @@ public class Follower
             {
                 _log($"Equipping class: {classToEquip}");
                 _bot.Inventory.EquipItem(classToEquip);
-                Thread.Sleep(1500); // let the equip + skill data settle
-                _skillClass = classToEquip;
+
+                // Poll for the equip to actually take (this also serves as the settle
+                // wait). If it never matches, the class isn't in this account's inventory
+                // (a misconfigured class type) - fall back to whatever's actually worn so
+                // the skill engine runs a real rotation instead of a phantom class, which
+                // would silently only auto-attack.
+                bool equipped = false;
+                for (int i = 0; i < 6; i++) // up to ~1.5s
+                {
+                    Thread.Sleep(250);
+                    string? worn = _bot.Player?.CurrentClass?.Name;
+                    if (!string.IsNullOrEmpty(worn) &&
+                        worn.Trim().Equals(classToEquip.Trim(), StringComparison.OrdinalIgnoreCase))
+                    {
+                        equipped = true;
+                        break;
+                    }
+                }
+
+                if (equipped)
+                {
+                    _skillClass = classToEquip;
+                }
+                else
+                {
+                    string? worn = _bot.Player?.CurrentClass?.Name;
+                    _log($"Couldn't equip '{classToEquip}' - not in {me}'s inventory? Keeping current class ({worn ?? "unknown"}).");
+                    _skillClass = worn;
+                }
             }
         }
         catch (Exception ex)
@@ -736,6 +790,35 @@ public class Follower
         catch (Exception ex)
         {
             DebugLog.Log("Follower", $"skill engine start failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Stops Skua's built-in Auto Attack/Hunt if the user has it on - it fights the butler's
+    /// own movement and skill engine. Mirrors what Skua does when a script takes over
+    /// (ScriptManager.StartScript calls Auto.StopAsync). Called on follow-start and every
+    /// tick, so re-enabling it mid-follow is undone. Logs only on the off->on transition.
+    /// </summary>
+    private void StopUserAuto()
+    {
+        try
+        {
+            if (_bot.Auto.IsRunning)
+            {
+                if (!_autoStopLogged)
+                {
+                    _autoStopLogged = true;
+                    _log("Stopped Skua's Auto Attack/Hunt - it conflicts with following; the butler runs combat itself.");
+                }
+                _bot.Auto.Stop();
+            }
+            else
+            {
+                _autoStopLogged = false;
+            }
+        }
+        catch
+        {
         }
     }
 

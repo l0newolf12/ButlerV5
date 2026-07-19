@@ -196,22 +196,32 @@ public class RosterWindow : CustomWindow
             _stateText.Foreground = GreenBrush;
         else
             SetThemeBrush(_stateText, TextBlock.ForegroundProperty, "MaterialDesignBodyLight", FallbackSubText);
+        // Whole plugin off (global master switch): every action is inert, so grey the
+        // buttons instead of letting them silently no-op / clear the list.
+        bool pluginOff = !_plugin.PluginEnabled;
+
         _stopButton.Visibility = followingWho != null ? Visibility.Visible : Visibility.Collapsed;
         _releaseAllButton.Visibility = myFollowers.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        _releaseAllButton.IsEnabled = !pluginOff;
 
         // While I'm a butler (following someone), I can't summon anyone (conga guard).
-        _summonAllButton.IsEnabled = followingWho == null;
-        _summonAllButton.ToolTip = followingWho == null
-            ? "Order every online ButlerV5 account to follow this one."
-            : $"You're following {followingWho} - stop that before summoning anyone.";
+        // And nothing can be summoned while the whole plugin is disabled.
+        _summonAllButton.IsEnabled = !pluginOff && followingWho == null;
+        _summonAllButton.ToolTip = pluginOff
+            ? "ButlerV5 is disabled - turn on 'Enable ButlerV5' in Settings first."
+            : followingWho == null
+                ? "Order every online ButlerV5 account to follow this one."
+                : $"You're following {followingWho} - stop that before summoning anyone.";
 
         // Honor the configurable refresh rate (option can change while we're open).
         TimeSpan interval = TimeSpan.FromSeconds(Math.Clamp(_plugin.RosterRefreshSeconds, 1, 30));
         if (_timer.Interval != interval)
             _timer.Interval = interval;
-        _footerText.Text = online.Count == 1
-            ? "1 plugin account online - refreshes every 2s"
-            : $"{online.Count} plugin accounts online - refreshes every 2s";
+        _footerText.Text = pluginOff
+            ? "ButlerV5 is DISABLED - turn on 'Enable ButlerV5' in Settings"
+            : online.Count == 1
+                ? "1 plugin account online - refreshes every 2s"
+                : $"{online.Count} plugin accounts online - refreshes every 2s";
 
         // ----- rows rebuild only when data actually changed -----
         string myServer = _plugin.MyServerName;

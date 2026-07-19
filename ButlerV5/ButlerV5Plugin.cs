@@ -17,8 +17,6 @@ public class ButlerV5Plugin : ISkuaPlugin
 
     public List<IOption>? Options { get; } = new()
     {
-        new Option<bool>("broadcast", "Enable broadcasting",
-            "Write this account's location file so other ButlerV5 accounts can see and follow it.", true),
         new Option<bool>("passiveAttack", "Only attack when master attacks",
             "While following: only fight while the master is fighting.\n" +
             "Off = always attack, like Butler v3 did. Default: Off.", false),
@@ -93,6 +91,14 @@ public class ButlerV5Plugin : ISkuaPlugin
             "outdated bypass list. Both sides must have this enabled. Fast: one game\n" +
             "read per sync, timing shown in the debug log. Default: On.",
             true),
+        new Option<bool>("questUnlockAll", "EXPERIMENTAL: unlock all quests",
+            "Nuclear bypass: sets EVERY quest slot to max CLIENT-SIDE, so every quest-\n" +
+            "locked cell/mob/map opens without cloning or a bypass list - a blunter\n" +
+            "alternative to quest cloning. Overrides 'clone master quest state' and\n" +
+            "'quest bypasses' while on. Client-side only, restored on relogin, but it\n" +
+            "scrambles this account's real quest log until then - avoid on an account\n" +
+            "you play by hand. Default: On.",
+            true),
         new Option<bool>("fakeLevel", "Fake level 100 (client-side)",
             "Shows this client as level 100 so level-gated maps (e.g. icestormunder)\n" +
             "let the butler in. Purely visual/client-side, but your character will\n" +
@@ -108,6 +114,13 @@ public class ButlerV5Plugin : ISkuaPlugin
             "Same as 'AntiLag while summoned', but only while MANUALLY following someone\n" +
             "(you clicked Follow in this client's window), not when summoned. Default: Off.",
             false),
+        new Option<bool>("enabled", "Enable ButlerV5",
+            "Master switch for the ENTIRE plugin. This is a GLOBAL setting - it affects\n" +
+            "every account at once. Turn it OFF to completely stop ButlerV5: no\n" +
+            "broadcasting, following, summoning, or quest/skill actions anywhere until you\n" +
+            "turn it back on. Turning it off stops any active butler in place (no parking).\n" +
+            "Default: On.",
+            true),
     };
 
     private IScriptInterface? _bot;
@@ -123,6 +136,7 @@ public class ButlerV5Plugin : ISkuaPlugin
     private Task? _orderWatcher;
     private DateTime _orderGoneSince = DateTime.MinValue;
     private bool _busyOrderLogged;
+    private bool _wasEnabledOrder = true;  // master-switch transition tracking in the order watcher
     private string? _declinedMaster;
     private EventHandler? _processExitHandler;
 
@@ -135,6 +149,9 @@ public class ButlerV5Plugin : ISkuaPlugin
 
     public string? OwnUsername => _bot?.Player?.LoggedIn == true ? _bot.Player.Username : null;
     public string MyServerName => _broadcaster?.CurrentServer ?? "";
+
+    /// <summary>Master switch: when false the whole plugin is inert (global option).</summary>
+    public bool PluginEnabled => GetOption("enabled", true);
     public IReadOnlyList<string> CurrentFollowers => _broadcaster?.Followers ?? new List<string>();
     public string? FollowingWho => _follower?.Master;
     public FollowSource FollowingHow => _follower?.Source ?? FollowSource.None;
@@ -166,8 +183,10 @@ public class ButlerV5Plugin : ISkuaPlugin
         DebugLog.Log("Plugin", $"Load: pid={Environment.ProcessId} container={( _container != null ? "ok" : "NULL")} bot={( _bot != null ? "ok" : "NULL")}");
 
         _broadcaster = new Broadcaster(_bot!,
-            () => GetOption("broadcast", true),
-            () => GetOption("questClone", true),
+            () => PluginEnabled,
+            // Suppress quest publishing when "unlock all" is on: a maxed butler would
+            // otherwise publish an all-max fake state that other accounts could clone.
+            () => GetOption("questClone", true) && !GetOption("questUnlockAll", true),
             // Only report "following" while actively following. Parked (master offline
             // or on a different server) keeps the order but idles at home, so the master
             // sees a "summoned" chip instead of "following me".
@@ -188,6 +207,7 @@ public class ButlerV5Plugin : ISkuaPlugin
             CustomBypassIds = () => GetOptionString("questBypassCustom", ""),
             LevelFake = () => GetOption("fakeLevel", false),
             QuestClone = () => GetOption("questClone", true),
+            UnlockAllQuests = () => GetOption("questUnlockAll", true),
             ScriptRunning = () => IsScriptRunning,
             AntiLagSummoned = () => GetOption("antiLagSummoned", true),
             AntiLagFollowing = () => GetOption("antiLagFollowing", false),
@@ -216,7 +236,7 @@ public class ButlerV5Plugin : ISkuaPlugin
         AppDomain.CurrentDomain.ProcessExit += _processExitHandler;
 
         helper.AddMenuButton(MenuButtonText, OpenWindow);
-        Log("Loaded. Broadcasting is " + (GetOption("broadcast", true) ? "on" : "off") + ".");
+        Log("Loaded. ButlerV5 is " + (PluginEnabled ? "enabled" : "DISABLED (Enable ButlerV5 is off)") + ".");
     }
 
     public void Unload()
@@ -287,6 +307,12 @@ public class ButlerV5Plugin : ISkuaPlugin
     {
         DebugLog.Log("UI", $"StartFollow({master}, {source})");
 
+        if (!PluginEnabled)
+        {
+            Log($"Can't follow {master} - ButlerV5 is disabled ('Enable ButlerV5' is off). Turn it on first.");
+            return;
+        }
+
         if (IsScriptRunning)
         {
             Log($"Can't start following {master}: a script is running ({RunningScriptName}). Stop it first.");
@@ -344,6 +370,12 @@ public class ButlerV5Plugin : ISkuaPlugin
                 Log($"Can't summon {username} while following {iAmFollowing} - stop that first.");
                 return;
             }
+            // Master switch off = the whole plugin is inert; summoning would do nothing.
+            if (!PluginEnabled)
+            {
+                Log($"Can't summon {username} - ButlerV5 is disabled ('Enable ButlerV5' is off). Turn it on first.");
+                return;
+            }
             current.Add(username);
         }
 
@@ -361,6 +393,13 @@ public class ButlerV5Plugin : ISkuaPlugin
         if (FollowingWho is { } iAmFollowing)
         {
             Log($"Can't summon while following {iAmFollowing} - stop that first.");
+            return;
+        }
+
+        // Master switch off = the whole plugin is inert; summoning would do nothing.
+        if (!PluginEnabled)
+        {
+            Log("Can't summon - ButlerV5 is disabled ('Enable ButlerV5' is off). Turn it on first.");
             return;
         }
 
@@ -532,6 +571,32 @@ public class ButlerV5Plugin : ISkuaPlugin
                         _classTypePushed = false;
 
                     CheckOptionsReload();
+
+                    // Master switch. Keep the class bridge + option reload above running so
+                    // we always notice it being turned back on, but if ButlerV5 is disabled,
+                    // cease everything: stop any active follow in place (no park), and don't
+                    // obey orders or serve handshakes until it's re-enabled.
+                    bool enabled = PluginEnabled;
+                    if (enabled != _wasEnabledOrder)
+                    {
+                        _wasEnabledOrder = enabled;
+                        if (!enabled)
+                        {
+                            DebugLog.Log("OrderWatcher", "ButlerV5 disabled - ceasing all activity (stop in place)");
+                            Log("ButlerV5 disabled - stopped. Turn 'Enable ButlerV5' back on to resume.");
+                            _follower?.Stop(); // cease in place, no park
+                        }
+                        else
+                        {
+                            DebugLog.Log("OrderWatcher", "ButlerV5 enabled - resuming");
+                            Log("ButlerV5 enabled - resuming.");
+                        }
+                    }
+                    if (!enabled)
+                    {
+                        WaitForOrderTick(token);
+                        continue;
+                    }
 
                     // Read every sync file ONCE per tick and share the snapshot with the
                     // handshake + order-matching steps (was 2-3 ReadAll + pid checks/tick).
@@ -829,6 +894,9 @@ public class ButlerV5Plugin : ISkuaPlugin
 
     private void Log(string message)
     {
+        // User-facing status: mirror into our own log window / auto-saved file (so it's
+        // visible alongside the diagnostics) AND Skua's own log panel.
+        DebugLog.Log("ButlerV5", message);
         try
         {
             _bot?.Log($"[ButlerV5] {message}");
