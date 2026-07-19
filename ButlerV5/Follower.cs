@@ -91,6 +91,7 @@ public class Follower
     private volatile bool _gotoOff;
     private volatile bool _isParking;
     private bool _antiLagApplied;  // we turned AntiLag on for this follow, so we revert it on stop
+    private AntiLagSnapshot? _antiLagPrior;  // the user's AntiLag settings before we forced them on
     private bool _autoStopLogged;  // logged the "stopped Skua Auto" notice once per on->off transition
 
     /// <summary>True while mid-park (walking home) - the master shouldn't re-summon yet.</summary>
@@ -623,6 +624,12 @@ public class Follower
     /// game reload). Only touches AntiLag when the matching option is on - it never fights
     /// a user who has enabled Lag Killer by hand for a source we aren't asked to manage.
     /// </summary>
+    /// <summary>The nine AntiLag settings, snapshotted before we force them on.</summary>
+    private readonly record struct AntiLagSnapshot(
+        bool LagKiller, bool FreezeMonsterPosition, bool DisableMonsterAnimation,
+        bool DisableDamageStrobe, bool DisableSelfAnimation, bool DisableWeaponAnimation,
+        bool DisableSkillAnimation, bool DisableAuraAnimations, bool MonstersHidden);
+
     private void ApplyAntiLag()
     {
         bool want = (Source == FollowSource.Ordered && _settings.AntiLagSummoned())
@@ -630,12 +637,16 @@ public class Follower
         if (!want)
             return;
 
-        SetAntiLag(true);
         if (!_antiLagApplied)
         {
+            // Snapshot the user's settings BEFORE forcing AntiLag on, so releasing can
+            // restore exactly what they had - never turning off something they'd enabled
+            // by hand. Captured once; a relogin re-apply must not overwrite it.
+            _antiLagPrior = CaptureAntiLagState();
             _antiLagApplied = true;
             DebugLog.Log("Follower", $"AntiLag ON (source={Source})");
         }
+        SetAntiLag(true);
     }
 
     private void RevertAntiLag()
@@ -643,8 +654,64 @@ public class Follower
         if (!_antiLagApplied)
             return;
         _antiLagApplied = false;
-        SetAntiLag(false);
-        DebugLog.Log("Follower", "AntiLag OFF (follow stopped)");
+        RestoreAntiLag(_antiLagPrior);
+        _antiLagPrior = null;
+        DebugLog.Log("Follower", "AntiLag OFF (restored pre-follow settings)");
+    }
+
+    private AntiLagSnapshot? CaptureAntiLagState()
+    {
+        try
+        {
+            return new AntiLagSnapshot(
+                _bot.Options.LagKiller,
+                _bot.Lite.FreezeMonsterPosition,
+                _bot.Lite.DisableMonsterAnimation,
+                _bot.Lite.DisableDamageStrobe,
+                _bot.Lite.DisableSelfAnimation,
+                _bot.Lite.DisableWeaponAnimation,
+                _bot.Lite.DisableSkillAnimation,
+                _bot.Lite.DisableAuraAnimations,
+                _bot.Flash.GetGameObject<bool>("ui.monsterIcon.redX.visible"));
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Log("Follower", $"AntiLag capture failed: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>Puts each setting back to its snapshotted value. Only what we turned on
+    /// (was false, now true) gets turned off; anything the user already had on stays on.</summary>
+    private void RestoreAntiLag(AntiLagSnapshot? snapshot)
+    {
+        // No snapshot (capture failed) - fall back to the old behavior of turning all off.
+        if (snapshot is not { } s)
+        {
+            SetAntiLag(false);
+            return;
+        }
+
+        try
+        {
+            _bot.Options.LagKiller = s.LagKiller;
+            _bot.Lite.FreezeMonsterPosition = s.FreezeMonsterPosition;
+            _bot.Lite.DisableMonsterAnimation = s.DisableMonsterAnimation;
+            _bot.Lite.DisableDamageStrobe = s.DisableDamageStrobe;
+            _bot.Lite.DisableSelfAnimation = s.DisableSelfAnimation;
+            _bot.Lite.DisableWeaponAnimation = s.DisableWeaponAnimation;
+            _bot.Lite.DisableSkillAnimation = s.DisableSkillAnimation;
+            _bot.Lite.DisableAuraAnimations = s.DisableAuraAnimations;
+
+            // Restore monster visibility to what it was (toggle only if it differs now).
+            bool hidden = _bot.Flash.GetGameObject<bool>("ui.monsterIcon.redX.visible");
+            if (hidden != s.MonstersHidden)
+                _bot.Flash.CallGameFunction("world.toggleMonsters");
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Log("Follower", $"AntiLag restore failed: {ex.Message}");
+        }
     }
 
     /// <summary>The exact bundle CoreBots' AntiLag uses: Lag Killer, the Lite animation

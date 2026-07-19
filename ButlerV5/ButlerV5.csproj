@@ -8,7 +8,7 @@
     <LangVersion>latest</LangVersion>
     <AssemblyName>ButlerV5</AssemblyName>
     <RootNamespace>ButlerV5</RootNamespace>
-    <Version>1.1.0</Version>
+    <Version>1.1.1</Version>
     <EnableDynamicLoading>true</EnableDynamicLoading>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <SkuaAssemblies>C:\Program Files\Skua\Assemblies</SkuaAssemblies>
