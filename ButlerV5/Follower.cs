@@ -71,6 +71,7 @@ public class Follower
     private string? _skillClass;
     private ClassUseMode _skillMode = ClassUseMode.Base;
     private bool _skillsActive;
+    private bool _skillsPaused;  // engine started but casting paused (rotation position kept)
     private string? _lastBypassMap;
     private string? _lastPreApplyMap;
     private DateTime _lastCloneFileTime = DateTime.MinValue;
@@ -422,10 +423,10 @@ public class Follower
                     // Pause the skill engine while traveling: it re-acquires targets on
                     // its own, dragging the butler back into combat and delaying the
                     // goto for many seconds after the master leaves the map.
-                    if (_skillsActive)
+                    if (_skillsActive && !_skillsPaused)
                     {
                         DebugLog.Log("Follower", "pausing skill engine to travel");
-                        StopSkills();
+                        PauseSkills();
                     }
                     StopAttacking(deaggroJump: true);
 
@@ -588,6 +589,7 @@ public class Follower
         GameServer.LogCandidates(_bot); // diagnostic: which source has the server name
         StopUserAuto(); // butler owns combat/skills - kill any user Auto Attack/Hunt first
         _skillsActive = false; // any prior engine died; SetupClassAndSkills re-starts it
+        _skillsPaused = false;
 
         SetupClassAndSkills(forceEquipCurrent: freshLogin);
 
@@ -901,6 +903,47 @@ public class Follower
             DebugLog.Log("Follower", $"skill engine stop failed: {ex.Message}");
         }
         _skillsActive = false;
+        _skillsPaused = false;
+    }
+
+    /// <summary>
+    /// Pauses skill CASTING without tearing the engine down - the rotation position is kept,
+    /// so resuming doesn't reset it. A full Stop + StartAdvanced DOES reset it, which stalls
+    /// Wait-For-Cooldown skills (they re-wait for the first skill's cooldown). Pausing also
+    /// halts the engine's target re-acquisition, so the deaggro cancel still sticks. Pause/
+    /// Resume aren't on the IScriptSkill interface, so we use the concrete ScriptSkill; any
+    /// build that doesn't expose it falls back to the old full-stop behavior.
+    /// </summary>
+    private void PauseSkills()
+    {
+        if (!_skillsActive || _skillsPaused)
+            return;
+        if (_bot.Skills is Skua.Core.Scripts.ScriptSkill ss)
+        {
+            try { ss.Pause(); } catch (Exception ex) { DebugLog.Log("Follower", $"skill pause failed: {ex.Message}"); }
+            _skillsPaused = true;
+            DebugLog.Log("Follower", "skill engine paused (rotation kept)");
+        }
+        else
+        {
+            StopSkills(); // no Pause on this build - degrade to old behavior
+        }
+    }
+
+    private void ResumeSkills()
+    {
+        if (!_skillsPaused)
+            return;
+        if (_bot.Skills is Skua.Core.Scripts.ScriptSkill ss)
+        {
+            try { ss.Resume(); } catch (Exception ex) { DebugLog.Log("Follower", $"skill resume failed: {ex.Message}"); }
+            _skillsPaused = false;
+            DebugLog.Log("Follower", "skill engine resumed");
+        }
+        else if (!_skillsActive)
+        {
+            StartSkills();
+        }
     }
 
     /// <summary>
@@ -966,18 +1009,17 @@ public class Follower
             {
                 if (!_skillsActive)
                     StartSkills();
+                else if (_skillsPaused)
+                    ResumeSkills();
                 _bot.Combat.Attack("*");
             }
             else
             {
-                // Pause skills BEFORE dropping the target: a running skill engine
-                // re-acquires targets on its own, causing an endless cancel →
-                // deaggro-jump → re-aggro flicker during passive idle.
-                if (_skillsActive)
-                {
-                    DebugLog.Log("Follower", "pausing skill engine (passive idle)");
-                    StopSkills();
-                }
+                // Pause (not stop) the engine on a passive idle: a full stop + restart
+                // resets the rotation, stalling Wait-For-Cooldown skills. Pausing also
+                // halts target re-acquisition, so the deaggro cancel below sticks.
+                if (_skillsActive && !_skillsPaused)
+                    PauseSkills();
                 StopAttacking(deaggroJump: true);
             }
         }

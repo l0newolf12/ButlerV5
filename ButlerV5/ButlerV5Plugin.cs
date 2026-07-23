@@ -10,7 +10,7 @@ public class ButlerV5Plugin : ISkuaPlugin
     private const string MenuButtonText = "Butler V5";
 
     public string Name => "Butler V5";
-    public string Author => "l0newolf";
+    public string Author => "l0newolf12";
     public string Description =>
         "Every account with this plugin broadcasts its location to a shared file. " +
         "Open the Butler V5 window to see who's online, follow someone, or order your alts to follow you.";
@@ -236,7 +236,7 @@ public class ButlerV5Plugin : ISkuaPlugin
         AppDomain.CurrentDomain.ProcessExit += _processExitHandler;
 
         helper.AddMenuButton(MenuButtonText, OpenWindow);
-        Log("Loaded. ButlerV5 is " + (PluginEnabled ? "enabled" : "DISABLED (Enable ButlerV5 is off)") + ".");
+        Log("ButlerV5 plugin loaded.");
     }
 
     public void Unload()

@@ -143,6 +143,15 @@ public class SettingsWindow : CustomWindow
         descStack.Children.Add(_descTitle);
         descStack.Children.Add(_descBody);
 
+        // Author + version, shown after the description (version pulled from the assembly so
+        // it always matches the .csproj, no hardcoded string to forget on a bump).
+        var asmVer = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
+        string verText = asmVer != null ? $"{asmVer.Major}.{asmVer.Minor}.{asmVer.Build}" : "?";
+        TextBlock meta = MakeText(11, FallbackSubText);
+        meta.Margin = new Thickness(0, 16, 0, 0);
+        meta.Text = $"Author: l0newolf12\nVersion: {verText}";
+        descStack.Children.Add(meta);
+
         ScrollViewer descScroll = new() { Content = descStack, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
         descPanel.Child = descScroll;
         Grid.SetRow(descPanel, 1);
