@@ -520,7 +520,7 @@ public class Follower
                         (DateTime.UtcNow - _lastJumpTime).TotalMilliseconds >= JumpMinIntervalMs)
                     {
                         DebugLog.Log("Follower", $"leech: jump {_bot.Player.Cell} -> Enter/Spawn");
-                        _bot.Map!.Jump("Enter", "Spawn");
+                        _bot.Map!.Jump("Enter", "Spawn", autoCorrect: false);
                         _lastJumpTime = DateTime.UtcNow;
                     }
                 }
@@ -559,7 +559,13 @@ public class Follower
                         (DateTime.UtcNow - _lastJumpTime).TotalMilliseconds >= JumpMinIntervalMs)
                     {
                         DebugLog.Log("Follower", $"jump {_bot.Player.Cell}/{_bot.Player.Pad} -> {targetCell}/{targetPad}");
-                        _bot.Map.Jump(targetCell, targetPad);
+                        // autoCorrect: false on every jump. It asks the client to validate
+                        // and "correct" the target against the map's cell list, and a recent
+                        // AQW update broke that path - clients that haven't patched it (e.g.
+                        // VibeSkua) silently fail to jump at all. We never need the safety
+                        // net anyway: every target here is a real cell (the master's own
+                        // position, our current cell, or Enter). Butler v3 does the same.
+                        _bot.Map.Jump(targetCell, targetPad, autoCorrect: false);
                         _lastJumpTime = DateTime.UtcNow;
                     }
 
@@ -1063,7 +1069,7 @@ public class Follower
             if (deaggroJump)
             {
                 DebugLog.Log("Follower", "same-cell rejoin to drop monster aggro");
-                _bot.Map!.Jump(_bot.Player?.Cell ?? "Enter", _bot.Player?.Pad ?? "Spawn");
+                _bot.Map!.Jump(_bot.Player?.Cell ?? "Enter", _bot.Player?.Pad ?? "Spawn", autoCorrect: false);
             }
         }
         catch
@@ -1219,7 +1225,7 @@ public class Follower
                     if (_bot.Player?.InCombat == true)
                     {
                         DebugLog.Log("Follower", "still in combat after 3 house attempts - jumping to Enter/Spawn to shed aggro");
-                        try { _bot.Map!.Jump("Enter", "Spawn"); } catch { }
+                        try { _bot.Map!.Jump("Enter", "Spawn", autoCorrect: false); } catch { }
                         for (int i = 0; i < 12 && _bot.Player?.InCombat == true; i++)
                             Thread.Sleep(250);
 
