@@ -18,6 +18,9 @@ public class FollowerSettings
     public required Func<bool> LevelFake { get; init; }
     public required Func<bool> QuestClone { get; init; }
 
+    /// <summary>Keep issuing goto even when already in the master's map and cell.</summary>
+    public required Func<bool> AlwaysGoto { get; init; }
+
     /// <summary>Nuclear bypass: max every quest slot client-side. Supersedes QuestClone and QuestBypasses.</summary>
     public required Func<bool> UnlockAllQuests { get; init; }
     public required Func<bool> ScriptRunning { get; init; }
@@ -150,7 +153,7 @@ public class Follower
         _packetStreamLogged = false;
         DebugLog.Log("Follower",
             $"options in THIS client: passiveAttack={_settings.PassiveAttack()} leech={_settings.LeechMode()} " +
-            $"park={_settings.Park()} gotoDelay={_settings.GotoDelayMs()}ms rescue={_settings.RescueThreshold()} " +
+            $"park={_settings.Park()} gotoDelay={_settings.GotoDelayMs()}ms alwaysGoto={_settings.AlwaysGoto()} rescue={_settings.RescueThreshold()} " +
             $"instantWarnings={_settings.InstantWarnings()} questBypass={_settings.QuestBypasses()} questClone={_settings.QuestClone()}");
         _log($"Following {master} ({source}).");
 
@@ -527,6 +530,17 @@ public class Follower
 
                     // Skill engine resume is handled by HandleCombat: it only runs
                     // while the butler should actually be fighting.
+
+                    // Belt-and-braces: the cell jump below relies on client-side reads
+                    // (own cell, the room title, the master's in-map position) and any of
+                    // those going stale - notably right after a death/respawn - leaves the
+                    // butler parked in the wrong cell with no jump ever firing. goto is
+                    // resolved server-side and always lands on the master, so this option
+                    // keeps issuing it even when we believe we're already in place.
+                    // Throttled by the same Goto delay as travel; leech mode is a separate
+                    // branch above, so it is unaffected.
+                    if (_settings.AlwaysGoto())
+                        TryGoto(master);
 
                     // In the master's room: only the CELL matters. Pads are ignored on
                     // purpose - walking within a cell changes a player's pad, and
@@ -1060,8 +1074,8 @@ public class Follower
     /// <returns>true if a goto was actually sent (not rate-limited).</returns>
     private bool TryGoto(string master)
     {
-        // Default (250ms) = the loop tick, so out-of-room goto fires every tick like
-        // Butler v3; the setting is the throttle for anyone who wants it gentler.
+        // Default (500ms) matches Butler v3's loop cadence. 250ms = the loop tick, the
+        // floor; the setting is the throttle for anyone who wants it gentler.
         int delayMs = Math.Clamp(_settings.GotoDelayMs(), 0, 60000);
         if ((DateTime.UtcNow - _lastGoto).TotalMilliseconds < delayMs)
             return false;

@@ -74,7 +74,8 @@ Set globally (and, for class type, per account) in the plugin's settings window.
 | AntiLag while summoned | On | Skua AntiLag while summoned (Ordered follow). |
 | Enable debug logs | On | Record diagnostics to the in-app log viewer. |
 | Auto-save logs to file | Off | Also write logs to `%APPDATA%\Skua\butlerv5_logs`. |
-| Goto delay | 250 ms | Delay between goto attempts while chasing. |
+| Goto delay | 500 ms | Delay between goto attempts while chasing (Butler v3's cadence). |
+| Always goto the master | Off | Keep sending goto even when already in the master's map and cell. Fixes butlers stuck in the wrong cell after dying. Ignored in leech mode. |
 | Class type | None | CoreBots Farm/Solo/Dodge/Boss to equip (per account). |
 | Park location | House | House / Whitemap / Stay when released. |
 | Obey summons | On | Off = ignore all summon orders (use on your hand-played account). |

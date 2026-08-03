@@ -34,11 +34,19 @@ public class ButlerV5Plugin : ISkuaPlugin
             "happens (one file per account). Off = logs live only in the viewer until you\n" +
             "click Save. This is a global option - applies to all accounts. Default: Off.", false),
         new Option<int>("gotoDelay", "Goto delay (milliseconds)",
-            "Milliseconds between goto attempts while chasing the master. Default: 250\n" +
-            "(= one loop tick, so goto fires every tick like Butler v3 - as fast as it gets).\n" +
-            "Raise it to chase more gently (fewer goto packets); too high and the butler\n" +
-            "lags behind you on map changes. Below ~250 does nothing - the loop is the floor.",
-            250),
+            "Milliseconds between goto attempts while chasing the master. Default: 500,\n" +
+            "the same cadence Butler v3 used. Lower it (down to ~250, the loop tick) to\n" +
+            "chase harder on map changes; raise it to send fewer goto commands, which\n" +
+            "matters most with 'Always goto the master' on, since that keeps them going\n" +
+            "for the whole follow. Below ~250 does nothing - the loop is the floor.",
+            500),
+        new Option<bool>("alwaysGoto", "Always goto the master",
+            "Keep sending goto even while already in the master's map and cell. Fixes\n" +
+            "butlers that end up in the wrong cell after dying and never walk back to\n" +
+            "the master on their own. Costs extra goto commands - one every 'Goto delay'\n" +
+            "milliseconds for as long as the follow lasts - so raise Goto delay if that\n" +
+            "feels like too much. Ignored in leech mode. Default: Off.",
+            false),
         new Option<ButlerClassType>("classType", "Class type",
             "Which CoreBots class this butler equips when it starts following:\n" +
             "Farm / Solo / Dodge / Boss as selected in CoreBots options, or None to\n" +
@@ -198,7 +206,7 @@ public class ButlerV5Plugin : ISkuaPlugin
         _follower = new Follower(_bot!, new FollowerSettings
         {
             PassiveAttack = () => GetOption("passiveAttack", false),
-            GotoDelayMs = () => GetOptionInt("gotoDelay", 250),
+            GotoDelayMs = () => GetOptionInt("gotoDelay", 500),
             RescueThreshold = () => GetOptionInt("rescueThreshold", 3),
             LeechMode = () => GetOption("leechMode", false),
             Park = () => GetOptionEnum("parkLocation", ParkSpot.House),
@@ -207,6 +215,7 @@ public class ButlerV5Plugin : ISkuaPlugin
             CustomBypassIds = () => GetOptionString("questBypassCustom", ""),
             LevelFake = () => GetOption("fakeLevel", false),
             QuestClone = () => GetOption("questClone", true),
+            AlwaysGoto = () => GetOption("alwaysGoto", false),
             UnlockAllQuests = () => GetOption("questUnlockAll", true),
             ScriptRunning = () => IsScriptRunning,
             AntiLagSummoned = () => GetOption("antiLagSummoned", true),
