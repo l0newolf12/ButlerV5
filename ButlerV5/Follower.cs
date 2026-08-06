@@ -96,6 +96,8 @@ public class Follower
     private volatile bool _isParking;
     private bool _antiLagApplied;  // we turned AntiLag on for this follow, so we revert it on stop
     private AntiLagSnapshot? _antiLagPrior;  // the user's AntiLag settings before we forced them on
+    private bool _butlerOptsApplied;         // we turned the butler QoL options on for this follow
+    private (bool InfiniteRange, bool SkipCutscenes)? _butlerOptsPrior;  // their values before we did
     private bool _autoStopLogged;  // logged the "stopped Skua Auto" notice once per on->off transition
 
     /// <summary>True while mid-park (walking home) - the master shouldn't re-summon yet.</summary>
@@ -179,6 +181,7 @@ public class Follower
         StopSkills();
         StopAttacking(deaggroJump: true);
         RevertAntiLag();
+        RevertButlerOptions();
         // Only park if we aren't already parked. Releasing a butler that's already
         // parked (e.g. stuck on a different server) shouldn't kick off a second,
         // slow house-join - it's already home.
@@ -638,6 +641,7 @@ public class Follower
         }
 
         ApplyAntiLag();
+        ApplyButlerOptions();
     }
 
     /// <summary>
@@ -669,6 +673,70 @@ public class Follower
             DebugLog.Log("Follower", $"AntiLag ON (source={Source})");
         }
         SetAntiLag(true);
+    }
+
+    /// <summary>
+    /// Turns on the two client options a butler always wants while following: Infinite Range
+    /// (hit the master's target without walking into range) and Skip Cutscenes (never sit
+    /// through a cutscene the master triggered). Applies for BOTH follow sources. The user's
+    /// prior values are snapshotted so Stop() restores them instead of forcing both off.
+    /// </summary>
+    private void ApplyButlerOptions()
+    {
+        try
+        {
+            if (!_butlerOptsApplied)
+            {
+                _butlerOptsPrior = (_bot.Options.InfiniteRange, _bot.Options.SkipCutscenes);
+                _butlerOptsApplied = true;
+                DebugLog.Log("Follower",
+                    $"butler options ON (was infiniteRange={_butlerOptsPrior.Value.InfiniteRange} " +
+                    $"skipCutscenes={_butlerOptsPrior.Value.SkipCutscenes})");
+            }
+            SetInfiniteRange(true);
+            SetSkipCutscenes(true);
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Log("Follower", $"butler options apply failed: {ex.Message}");
+        }
+    }
+
+    private void RevertButlerOptions()
+    {
+        if (!_butlerOptsApplied)
+            return;
+        _butlerOptsApplied = false;
+        try
+        {
+            if (_butlerOptsPrior is { } prior)
+            {
+                SetInfiniteRange(prior.InfiniteRange);
+                SetSkipCutscenes(prior.SkipCutscenes);
+                DebugLog.Log("Follower", "butler options OFF (restored pre-follow settings)");
+            }
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Log("Follower", $"butler options restore failed: {ex.Message}");
+        }
+        _butlerOptsPrior = null;
+    }
+
+    // Both of these Skua properties are TOGGLES on the Flash side: the setter calls
+    // Flash.Call("infiniteRange") / Flash.Call("skipCutscenes") with NO value, so assigning
+    // the same value twice flips the game state back while the C# property still reports the
+    // value we assigned. Only ever assign when the tracked value actually differs.
+    private void SetInfiniteRange(bool on)
+    {
+        if (_bot.Options.InfiniteRange != on)
+            _bot.Options.InfiniteRange = on;
+    }
+
+    private void SetSkipCutscenes(bool on)
+    {
+        if (_bot.Options.SkipCutscenes != on)
+            _bot.Options.SkipCutscenes = on;
     }
 
     private void RevertAntiLag()
