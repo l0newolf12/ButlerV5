@@ -254,6 +254,12 @@ public class Follower
                 // of Skua's "no Auto while a script runs"). Cheap bool read per tick.
                 StopUserAuto();
 
+                // Parking is an enforced no-combat state. Keep both Skua aggro modes off
+                // while waiting too, so another component cannot re-enable them after the
+                // initial deaggro and strand this account in combat again.
+                if (_parked)
+                    ForceParkingAggroOff();
+
                 if (_gotoOff)
                 {
                     _log($"{master} is ignoring goto requests (incognito mode?). Stopping follow.");
@@ -611,8 +617,12 @@ public class Follower
     {
         GameServer.LogCandidates(_bot); // diagnostic: which source has the server name
         StopUserAuto(); // butler owns combat/skills - kill any user Auto Attack/Hunt first
-        _skillsActive = false; // any prior engine died; SetupClassAndSkills re-starts it
-        _skillsPaused = false;
+
+        // A reconnect does not guarantee that Skua's skill worker exited. It may still
+        // be running or paused from the previous session, so shut it down through the
+        // pause-safe path before preparing the new rotation. Skills are still started
+        // lazily by HandleCombat after we reach the master.
+        StopSkills();
 
         SetupClassAndSkills(forceEquipCurrent: freshLogin);
 
@@ -936,16 +946,27 @@ public class Follower
 
     private void StartSkills()
     {
+        RefreshSkillState();
+        if (_skillsActive)
+        {
+            if (_skillsPaused)
+                ResumeSkills();
+            return;
+        }
+
         try
         {
             string skillClass = _skillClass ?? _bot.Player?.CurrentClass?.Name ?? "generic";
             DebugLog.Log("Follower", $"starting skill engine: {skillClass} ({_skillMode})");
             _bot.Skills.StartAdvanced(skillClass, false, _skillMode);
-            _skillsActive = true;
-            DebugLog.Log("Follower", $"skill engine armed: TimerRunning={_bot.Skills.TimerRunning}");
+            RefreshSkillState();
+            DebugLog.Log("Follower", $"skill engine start state: TimerRunning={_skillsActive} IsPaused={_skillsPaused}");
+            if (!_skillsActive)
+                DebugLog.Log("Follower", "skill engine did not report a running timer after StartAdvanced");
         }
         catch (Exception ex)
         {
+            RefreshSkillState();
             DebugLog.Log("Follower", $"skill engine start failed: {ex.Message}");
         }
     }
@@ -983,15 +1004,25 @@ public class Follower
     {
         try
         {
+            // ScriptSkill.Stop cancels its token but does not signal the ManualResetEvent
+            // used by Pause. Stopping while paused therefore strands its worker inside
+            // WaitOne(), leaves TimerRunning true, and makes every later StartAdvanced a
+            // no-op. Wake the worker first so it can observe cancellation and exit.
+            if (_bot.Skills is Skua.Core.Scripts.ScriptSkill ss && ss.IsPaused)
+            {
+                DebugLog.Log("Follower", "resuming paused skill engine before stop to release Skua's pause wait");
+                ss.Resume();
+            }
+
             _bot.Skills.Stop();
-            DebugLog.Log("Follower", $"skill engine stopped (timer still running: {_bot.Skills.TimerRunning})");
         }
         catch (Exception ex)
         {
             DebugLog.Log("Follower", $"skill engine stop failed: {ex.Message}");
         }
-        _skillsActive = false;
-        _skillsPaused = false;
+
+        RefreshSkillState();
+        DebugLog.Log("Follower", $"skill engine stop state: TimerRunning={_skillsActive} IsPaused={_skillsPaused}");
     }
 
     /// <summary>
@@ -999,18 +1030,29 @@ public class Follower
     /// so resuming doesn't reset it. A full Stop + StartAdvanced DOES reset it, which stalls
     /// Wait-For-Cooldown skills (they re-wait for the first skill's cooldown). Pausing also
     /// halts the engine's target re-acquisition, so the deaggro cancel still sticks. Pause/
-    /// Resume aren't on the IScriptSkill interface, so we use the concrete ScriptSkill; any
-    /// build that doesn't expose it falls back to the old full-stop behavior.
+    /// The concrete ScriptSkill also exposes its real IsPaused state, which lets Butler
+    /// verify that pause/resume succeeded instead of letting its private flags drift.
     /// </summary>
     private void PauseSkills()
     {
+        RefreshSkillState();
         if (!_skillsActive || _skillsPaused)
             return;
         if (_bot.Skills is Skua.Core.Scripts.ScriptSkill ss)
         {
-            try { ss.Pause(); } catch (Exception ex) { DebugLog.Log("Follower", $"skill pause failed: {ex.Message}"); }
-            _skillsPaused = true;
-            DebugLog.Log("Follower", "skill engine paused (rotation kept)");
+            try
+            {
+                ss.Pause();
+                RefreshSkillState();
+                DebugLog.Log("Follower", _skillsPaused
+                    ? "skill engine paused (rotation kept)"
+                    : "skill engine did not enter the paused state");
+            }
+            catch (Exception ex)
+            {
+                RefreshSkillState();
+                DebugLog.Log("Follower", $"skill pause failed: {ex.Message}");
+            }
         }
         else
         {
@@ -1020,18 +1062,47 @@ public class Follower
 
     private void ResumeSkills()
     {
-        if (!_skillsPaused)
-            return;
-        if (_bot.Skills is Skua.Core.Scripts.ScriptSkill ss)
-        {
-            try { ss.Resume(); } catch (Exception ex) { DebugLog.Log("Follower", $"skill resume failed: {ex.Message}"); }
-            _skillsPaused = false;
-            DebugLog.Log("Follower", "skill engine resumed");
-        }
-        else if (!_skillsActive)
+        RefreshSkillState();
+        if (!_skillsActive)
         {
             StartSkills();
+            return;
         }
+        if (!_skillsPaused)
+            return;
+
+        if (_bot.Skills is Skua.Core.Scripts.ScriptSkill ss)
+        {
+            try
+            {
+                ss.Resume();
+                RefreshSkillState();
+                DebugLog.Log("Follower", !_skillsPaused
+                    ? "skill engine resumed"
+                    : "skill engine still reports paused after Resume");
+            }
+            catch (Exception ex)
+            {
+                RefreshSkillState();
+                DebugLog.Log("Follower", $"skill resume failed: {ex.Message}");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Reconciles Butler's cached skill state with Skua's worker. Skua can terminate its
+    /// timer after an internal exception, so Butler's flags must never be the sole source
+    /// of truth or HandleCombat will continue basic attacks without restarting skills.
+    /// </summary>
+    private void RefreshSkillState()
+    {
+        bool running = _bot.Skills.TimerRunning;
+        bool paused = running &&
+            _bot.Skills is Skua.Core.Scripts.ScriptSkill ss &&
+            ss.IsPaused;
+
+        _skillsActive = running;
+        _skillsPaused = paused;
     }
 
     /// <summary>
@@ -1091,6 +1162,9 @@ public class Follower
     {
         try
         {
+            // Recover if Skua's skill worker exited silently or its pause state changed
+            // independently of Butler's cached flags.
+            RefreshSkillState();
             bool shouldAttack = !_settings.PassiveAttack() || master.Attacking;
 
             if (shouldAttack)
@@ -1212,6 +1286,7 @@ public class Follower
         {
             _log(reason);
             DebugLog.Log("Follower", $"PARK: {reason}");
+            ForceParkingAggroOff();
             StopSkills();
             StopAttacking(deaggroJump: true);
 
@@ -1240,7 +1315,7 @@ public class Follower
             // combat - this is how "parking" used to end up in whitemap. Give the
             // combat state a moment to drop after the deaggro jump.
             for (int i = 0; i < 12 && _bot.Player?.InCombat == true; i++)
-                Thread.Sleep(250);
+                ParkingWait(250);
             if (_bot.Player?.InCombat == true)
                 DebugLog.Log("Follower", "still flagged in-combat after 3s - parking anyway");
 
@@ -1261,7 +1336,7 @@ public class Follower
                     // started in (release can happen inside the master's house).
                     // The post-combat cooldown almost always eats an immediate attempt;
                     // waiting 3s first usually makes attempt 1 the one that lands.
-                    Thread.Sleep(3000);
+                    ParkingWait(3000);
 
                     for (int attempt = 1; attempt <= 3; attempt++)
                     {
@@ -1269,7 +1344,7 @@ public class Follower
 
                         for (int i = 0; i < 24; i++)
                         {
-                            Thread.Sleep(250);
+                            ParkingWait(250);
                             string current = GetMyMapRoom();
                             if (current.StartsWith("house-", StringComparison.OrdinalIgnoreCase) &&
                                 !current.Equals(roomBefore, StringComparison.OrdinalIgnoreCase))
@@ -1282,7 +1357,7 @@ public class Follower
                         if (attempt < 3)
                         {
                             DebugLog.Log("Follower", $"house join attempt {attempt} didn't land (post-combat cooldown?) - retrying in 5s");
-                            Thread.Sleep(5000);
+                            ParkingWait(5000);
                         }
                     }
 
@@ -1295,16 +1370,16 @@ public class Follower
                         DebugLog.Log("Follower", "still in combat after 3 house attempts - jumping to Enter/Spawn to shed aggro");
                         try { _bot.Map!.Jump("Enter", "Spawn", autoCorrect: false); } catch { }
                         for (int i = 0; i < 12 && _bot.Player?.InCombat == true; i++)
-                            Thread.Sleep(250);
+                            ParkingWait(250);
 
                         // Aggro is shed now, but the house-join cooldown outlives the combat
                         // flag by several seconds - a join right here gets rejected and drops
                         // us to whitemap. Wait the cooldown out, then retry once.
-                        Thread.Sleep(4000);
+                        ParkingWait(4000);
                         _bot.Send.Packet($"%xt%zm%house%1%{_bot.Player!.Username}%");
                         for (int i = 0; i < 24; i++)
                         {
-                            Thread.Sleep(250);
+                            ParkingWait(250);
                             string current = GetMyMapRoom();
                             if (current.StartsWith("house-", StringComparison.OrdinalIgnoreCase) &&
                                 !current.Equals(roomBefore, StringComparison.OrdinalIgnoreCase))
@@ -1330,6 +1405,7 @@ public class Follower
                 DebugLog.Log("Follower", $"house park failed: {ex.Message}");
             }
 
+            ForceParkingAggroOff();
             _bot.Map!.Join(ParkMap);
         }
         catch (Exception ex)
@@ -1338,8 +1414,50 @@ public class Follower
         }
         finally
         {
+            ForceParkingAggroOff();
             _isParking = false;
         }
+    }
+
+    /// <summary>
+    /// Parking always wins over user or script aggro settings. These values are
+    /// intentionally not restored: a parked butler must stay passive until something
+    /// explicitly turns aggro back on after it resumes normal following.
+    /// </summary>
+    private void ForceParkingAggroOff()
+    {
+        try
+        {
+            bool roomAggro = _bot.Options.AggroMonsters;
+            bool mapAggro = _bot.Options.AggroAllMonsters;
+            _bot.Options.AggroMonsters = false;
+            _bot.Options.AggroAllMonsters = false;
+
+            if (roomAggro || mapAggro)
+                DebugLog.Log("Follower", $"parking forced aggro OFF (room={roomAggro} map={mapAggro})");
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Log("Follower", $"parking aggro-off enforcement failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Long parking retries used to leave multi-second windows in which another
+    /// component could turn aggro back on. Slice those waits and reassert the passive
+    /// state at least every 100 ms.
+    /// </summary>
+    private void ParkingWait(int milliseconds)
+    {
+        int remaining = Math.Max(0, milliseconds);
+        while (remaining > 0)
+        {
+            ForceParkingAggroOff();
+            int slice = Math.Min(100, remaining);
+            Thread.Sleep(slice);
+            remaining -= slice;
+        }
+        ForceParkingAggroOff();
     }
 
     /// <summary>
@@ -1380,7 +1498,30 @@ public class Follower
                string.Equals(m.Server, myServer, StringComparison.OrdinalIgnoreCase);
     }
 
-    private static void Wait(CancellationToken token, int ms) => token.WaitHandle.WaitOne(ms);
+    /// <summary>
+    /// Normal follower waits remain a single cancellation-aware wait. While parked,
+    /// wake every 100 ms to keep both aggro switches forced off for the entire idle
+    /// period, including the longer offline/server-mismatch waits.
+    /// </summary>
+    private void Wait(CancellationToken token, int ms)
+    {
+        if (!_parked)
+        {
+            token.WaitHandle.WaitOne(ms);
+            return;
+        }
+
+        int remaining = Math.Max(0, ms);
+        while (remaining > 0 && !token.IsCancellationRequested)
+        {
+            ForceParkingAggroOff();
+            int slice = Math.Min(100, remaining);
+            if (token.WaitHandle.WaitOne(slice))
+                break;
+            remaining -= slice;
+        }
+        ForceParkingAggroOff();
+    }
 
     /// <summary>Same server warnings Butler v3 reacts to, minus the locked-maps list.</summary>
     private void PacketListener(dynamic packet)
