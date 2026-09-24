@@ -19,6 +19,8 @@ public class SyncData
     public string Pad = "Spawn";
     public bool LoggedIn;
     public bool Attacking;
+    /// <summary>True when this account's AQW "Enable Goto" preference is off.</summary>
+    public bool OffGoto;
     public List<string> Followers = new();
 
     /// <summary>Who this account is currently following ("" = nobody).</summary>
@@ -48,6 +50,7 @@ public class SyncData
         sb.Append("pad=").Append(Pad).Append('\n');
         sb.Append("loggedin=").Append(LoggedIn ? '1' : '0').Append('\n');
         sb.Append("attacking=").Append(Attacking ? '1' : '0').Append('\n');
+        sb.Append("offgoto=").Append(OffGoto ? '1' : '0').Append('\n');
         sb.Append("followers=").Append(string.Join(",", Followers)).Append('\n');
         sb.Append("following=").Append(Following).Append('\n');
         sb.Append("script=").Append(ScriptOn ? '1' : '0').Append('\n');
@@ -86,6 +89,7 @@ public class SyncData
                 case "pad": data.Pad = value; break;
                 case "loggedin": data.LoggedIn = value == "1"; break;
                 case "attacking": data.Attacking = value == "1"; break;
+                case "offgoto": data.OffGoto = value == "1"; break;
                 case "followers":
                     data.Followers = value
                         .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)

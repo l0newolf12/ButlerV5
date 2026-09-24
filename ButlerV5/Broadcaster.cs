@@ -26,6 +26,7 @@ public class Broadcaster
     private string _lastWritten = "";
     private string _lastKnownRoom = "1";
     private volatile string _lastServer = "";
+    private bool _lastOffGoto;
 
     /// <summary>This account's current server name (cached from the last broadcast).</summary>
     public string CurrentServer => _lastServer;
@@ -182,6 +183,12 @@ public class Broadcaster
             string server = GameServer.CurrentName(_bot); // server NAME, not IP (sock7 is shared)
             _lastServer = server;
 
+            // AQW stores the "Enable Goto" social preference here. A nullable read
+            // distinguishes a transient Flash read failure from an actual false value.
+            bool? gotoEnabled = _bot.Flash.GetGameObject<bool?>("uoPref.bGoto");
+            if (gotoEnabled.HasValue)
+                _lastOffGoto = !gotoEnabled.Value;
+
             lock (_writeLock)
             {
                 _lastUsername = player.Username;
@@ -197,6 +204,7 @@ public class Broadcaster
                     Pad = player.Pad ?? "Spawn",
                     LoggedIn = true,
                     Attacking = attacking,
+                    OffGoto = _lastOffGoto,
                     Followers = _followers.ToList(),
                     Following = SafeGet(_followingProvider) ?? "",
                     ScriptOn = SafeGet(_scriptNameProvider) != null,

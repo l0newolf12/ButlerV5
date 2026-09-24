@@ -15,8 +15,8 @@ Butler v3 script, tuned to feel just as fast.
 
 - **Master / follower following** — start a follow from the follower's own window, or
   summon your alts to you (master side). Multiple butlers per master.
-- **Fast travel** — rate-limited `goto` every tick with a file-join rescue for locked
-  maps, mirroring Butler v3's speed.
+- **Fast travel** — rate-limited `goto` when enabled, with direct map-room joins when
+  the master has goto disabled or a goto cannot reach them.
 - **Quest handling** — per-map `UpdateQuest` bypasses for quest-locked cells/mobs, plus
   experimental client-side cloning of the master's quest state (merge-max, event-driven).
 - **Class & skills** — equips the CoreBots Farm/Solo class per account and runs Skua's
@@ -75,7 +75,7 @@ Set globally (and, for class type, per account) in the plugin's settings window.
 | Enable debug logs | On | Record diagnostics to the in-app log viewer. |
 | Auto-save logs to file | Off | Also write logs to `%APPDATA%\Skua\butlerv5_logs`. |
 | Goto delay | 500 ms | Delay between goto attempts while chasing (Butler v3's cadence). |
-| Always goto the master | Off | Keep sending goto even when already in the master's map and cell. Fixes butlers stuck in the wrong cell after dying. Ignored in leech mode. |
+| Always goto the master | Off | Keep sending goto even when already in the master's map and cell, unless the master has goto disabled. Fixes butlers stuck in the wrong cell after dying. Ignored in leech mode. |
 | Class type | None | CoreBots Farm/Solo/Dodge/Boss to equip (per account). |
 | Park location | House | House / Whitemap / Stay when released. |
 | Obey summons | On | Off = ignore all summon orders (use on your hand-played account). |
@@ -98,6 +98,13 @@ Each account writes a `{username}_butlerv5` key=value file to
 release / order handling is near-instant, with a slow poll as a safety net. Offline
 detection is by `loggedin=0` or a dead PID (no time-based staleness). Quest state is
 shared via a companion `{username}_butlerv5_quests` file.
+The location file includes `offgoto=1` while that account's AQW **Enable Goto**
+preference is off (`offgoto=0` otherwise). Older location files without this line
+are treated as goto enabled; a server rejection still switches the follower to
+direct joins.
+When the master is in their own house, Butler enters it by username and verifies
+the resulting house instance before following. Another player's house is outside
+this fallback; if the instance differs, Butler parks until the master moves.
 
 ## Disclaimer
 

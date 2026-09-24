@@ -114,9 +114,9 @@ public class ButlerV5Plugin : ISkuaPlugin
             false),
         new Option<bool>("instantWarnings", "Instant warning detection",
             "Reads the raw game packet stream to catch 'Locked zone' / 'room is full' /\n" +
-            "'ignoring goto' warnings the moment they arrive - near-instant locked-map\n" +
-            "rescue, same detection Butler v3 used. The failed-goto counter still runs\n" +
-            "underneath as a fallback. Turn off if following misbehaves. Default: On.",
+            "'ignoring goto' warnings the moment they arrive - near-instant rescue\n" +
+            "or a direct join. Failed-goto counting still works if no warning arrives.\n" +
+            "Turn off if following misbehaves. Default: On.",
             true),
         new Option<bool>("antiLagFollowing", "AntiLag while following",
             "Same as 'AntiLag while summoned', but only while MANUALLY following someone\n" +
@@ -635,13 +635,6 @@ public class ButlerV5Plugin : ISkuaPlugin
                             CurrentFollowers.Any(f => f.Equals(master.Username, StringComparison.OrdinalIgnoreCase)))
                         {
                             DebugLog.Log("OrderWatcher", $"ignoring order from {master.Username}: they are in my own followers list");
-                            master = null;
-                        }
-
-                        // A master who ignores goto stays blocked until a manual follow.
-                        if (master != null &&
-                            master.Username.Equals(_follower.GotoBlockedMaster, StringComparison.OrdinalIgnoreCase))
-                        {
                             master = null;
                         }
 

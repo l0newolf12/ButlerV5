@@ -141,6 +141,6 @@ public static class DebugLog
         d == null
             ? "(no file)"
             : $"user={d.Username} pid={d.Pid} loggedin={(d.LoggedIn ? 1 : 0)} map={d.MapWithRoom} " +
-              $"cell={d.Cell} pad={d.Pad} attacking={(d.Attacking ? 1 : 0)} server={d.Server} " +
+              $"cell={d.Cell} pad={d.Pad} attacking={(d.Attacking ? 1 : 0)} offgoto={(d.OffGoto ? 1 : 0)} server={d.Server} " +
               $"followers=[{string.Join(",", d.Followers)}]";
 }
