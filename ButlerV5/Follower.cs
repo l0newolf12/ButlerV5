@@ -102,6 +102,8 @@ public class Follower
     private bool _butlerOptsApplied;         // we turned the butler QoL options on for this follow
     private (bool InfiniteRange, bool SkipCutscenes)? _butlerOptsPrior;  // their values before we did
     private bool _autoStopLogged;  // logged the "stopped Skua Auto" notice once per on->off transition
+    private string? _ownHouseUsername;  // cache belongs to this logged-in account only
+    private string? _ownHouseRoom;      // house-<CharID>, not ScriptPlayer.ID (session uid)
 
     /// <summary>True while mid-park (walking home) - the master shouldn't re-summon yet.</summary>
     public bool IsParking => _isParking;
@@ -1561,14 +1563,41 @@ public class Follower
     }
 
     /// <summary>
-    /// AQW uses the owner's persistent player ID as the house room number. A generic
-    /// "house-" prefix also matches the master's or another player's house.
+    /// AQW uses the owner's persistent CharID as the house room number. Skua's
+    /// Player.ID reads myAvatar.uid, a session ID that is NOT the house owner ID.
+    /// Cache a successful lookup for this username so parking retries do not keep
+    /// crossing the Flash bridge. A generic "house-" prefix also matches others.
     /// </summary>
     private bool IsInOwnHouse(string room)
     {
-        int ownerId = _bot.Player?.ID ?? 0;
-        return ownerId > 0 &&
-               string.Equals(room, $"house-{ownerId}", StringComparison.OrdinalIgnoreCase);
+        try
+        {
+            string? username = _bot.Player?.Username;
+            if (string.IsNullOrWhiteSpace(username))
+                return false;
+
+            if (!string.Equals(username, _ownHouseUsername, StringComparison.OrdinalIgnoreCase))
+            {
+                _ownHouseUsername = username;
+                _ownHouseRoom = null;
+            }
+
+            if (_ownHouseRoom == null)
+            {
+                int charId = _bot.Flash.GetGameObject<int>("world.myAvatar.objData.CharID");
+                if (charId <= 0)
+                    return false;
+                _ownHouseRoom = $"house-{charId}";
+                DebugLog.Log("Follower", $"own house room resolved from CharID: {_ownHouseRoom}");
+            }
+
+            return string.Equals(room, _ownHouseRoom, StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Log("Follower", $"own house CharID lookup failed: {ex.Message}");
+            return false;
+        }
     }
 
     private bool SameServer(SyncData m)
