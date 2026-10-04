@@ -227,7 +227,7 @@ public class RosterWindow : CustomWindow
         string myServer = _plugin.MyServerName;
         string snapshot = string.Join(";", online.Select(d =>
             $"{d.Username}|{d.MapWithRoom}|{(d.Attacking ? 1 : 0)}|{(myFollowers.Contains(d.Username) ? 1 : 0)}" +
-            $"|{d.Following}|{(d.ScriptOn ? 1 : 0)}|{d.ScriptName}|{(d.Parking ? 1 : 0)}|{d.Followers.Count}|{d.Server}")) +
+            $"|{d.Following}|{(d.ScriptOn ? 1 : 0)}|{d.ScriptName}|{(d.Parking ? 1 : 0)}|{d.Followers.Count}|{d.Server}|{d.ClassName}")) +
             $"@{followingWho}@{myServer}";
         if (!force && snapshot == _lastSnapshot)
             return;
@@ -323,7 +323,11 @@ public class RosterWindow : CustomWindow
         info.Children.Add(nameLine);
 
         TextBlock location = MakeText(11, "MaterialDesignBodyLight", FallbackSubText);
-        location.Text = string.IsNullOrEmpty(d.Server) ? d.MapWithRoom : $"{d.MapWithRoom}   ·   {d.Server}";
+        // Older plugin versions omit class=; only show values they actually publish.
+        location.Text = string.Join("   ·   ", new[] { d.MapWithRoom, d.Server, d.ClassName }
+            .Where(value => !string.IsNullOrEmpty(value)));
+        location.TextTrimming = TextTrimming.CharacterEllipsis;
+        location.ToolTip = location.Text;
         location.Margin = new Thickness(0, 2, 0, 0);
         info.Children.Add(location);
         grid.Children.Add(info);

@@ -27,7 +27,7 @@ Butler v3 script, tuned to feel just as fast.
 - **Conga-line prevention** — an account can't be both a butler and a master at once.
 - **AntiLag** — optionally enable Skua's AntiLag (Lag Killer + animation cuts + hidden
   monsters) while summoned and/or while following, for lighter multi-boxing.
-- **Roster window** — see who's online, their map/room/server, and follow/summon/release
+- **Roster window** — see who's online, their map/room/server and currently equipped class, and follow/summon/release
   with per-row buttons that grey out when an action isn't valid.
 - **Custom settings + log window** — all options with descriptions, plus a colored
   in-app debug log viewer.

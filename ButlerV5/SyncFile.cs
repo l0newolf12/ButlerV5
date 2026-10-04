@@ -13,6 +13,8 @@ public class SyncData
     public string Username = "";
     public int Pid;
     public string Server = "";
+    /// <summary>Actually equipped class, not the configured follow class type.</summary>
+    public string ClassName = "";
     public string Map = "";
     public string Room = "1";
     public string Cell = "Enter";
@@ -44,6 +46,7 @@ public class SyncData
         sb.Append("username=").Append(Username).Append('\n');
         sb.Append("pid=").Append(Pid).Append('\n');
         sb.Append("server=").Append(Server).Append('\n');
+        sb.Append("class=").Append(ClassName).Append('\n');
         sb.Append("map=").Append(Map).Append('\n');
         sb.Append("room=").Append(Room).Append('\n');
         sb.Append("cell=").Append(Cell).Append('\n');
@@ -83,6 +86,7 @@ public class SyncData
                 case "username": data.Username = value; sawUsername = !string.IsNullOrEmpty(value); break;
                 case "pid": _ = int.TryParse(value, out data.Pid); break;
                 case "server": data.Server = value; break;
+                case "class": data.ClassName = value; break;
                 case "map": data.Map = value.ToLowerInvariant(); break;
                 case "room": data.Room = value; break;
                 case "cell": data.Cell = value; break;

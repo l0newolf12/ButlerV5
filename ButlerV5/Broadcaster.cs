@@ -27,6 +27,8 @@ public class Broadcaster
     private string _lastKnownRoom = "1";
     private volatile string _lastServer = "";
     private bool _lastOffGoto;
+    private string _lastClassName = "";
+    private DateTime _lastClassCheck = DateTime.MinValue;
 
     /// <summary>This account's current server name (cached from the last broadcast).</summary>
     public string CurrentServer => _lastServer;
@@ -191,13 +193,29 @@ public class Broadcaster
 
             lock (_writeLock)
             {
+                if (!player.Username.Equals(_lastUsername, StringComparison.OrdinalIgnoreCase))
+                {
+                    _lastClassName = "";
+                    _lastClassCheck = DateTime.MinValue;
+                }
                 _lastUsername = player.Username;
+
+                // CurrentClass scans inventory; sample at roster cadence rather than
+                // on every 250ms location poll. A transient read failure keeps the
+                // last known class until the next sample.
+                if ((DateTime.UtcNow - _lastClassCheck).TotalSeconds >= 2)
+                {
+                    _lastClassCheck = DateTime.UtcNow;
+                    try { _lastClassName = player.CurrentClass?.Name ?? _lastClassName; }
+                    catch { }
+                }
 
                 SyncData data = new()
                 {
                     Username = player.Username,
                     Pid = Environment.ProcessId,
                     Server = server,
+                    ClassName = _lastClassName,
                     Map = mapName,
                     Room = ResolveRoom(),
                     Cell = player.Cell ?? "Enter",
@@ -243,6 +261,8 @@ public class Broadcaster
                 };
 
                 WriteIfChanged(data);
+                _lastClassName = "";
+                _lastClassCheck = DateTime.MinValue;
             }
         }
         catch
