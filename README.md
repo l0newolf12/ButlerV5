@@ -32,6 +32,9 @@ Butler v3 script, tuned to feel just as fast.
 - **Custom settings + log window** — all options with descriptions, plus a colored
   in-app debug log viewer.
 
+Messages sent to Skua's scripting log use anonymous account roles and counts.
+ButlerV5's own debug viewer, saved logs, and exports retain names for diagnostics.
+
 ## Building
 
 The project references Skua's assemblies from the default install path via the

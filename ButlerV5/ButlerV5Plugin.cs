@@ -318,20 +318,23 @@ public class ButlerV5Plugin : ISkuaPlugin
 
         if (!PluginEnabled)
         {
-            Log($"Can't follow {master} - ButlerV5 is disabled ('Enable ButlerV5' is off). Turn it on first.");
+            Log($"Can't follow {master} - ButlerV5 is disabled ('Enable ButlerV5' is off). Turn it on first.",
+                "Can't follow the master - ButlerV5 is disabled ('Enable ButlerV5' is off). Turn it on first.");
             return;
         }
 
         if (IsScriptRunning)
         {
-            Log($"Can't start following {master}: a script is running ({RunningScriptName}). Stop it first.");
+            Log($"Can't start following {master}: a script is running ({RunningScriptName}). Stop it first.",
+                "Can't start following the master: a script is running on this account. Stop it first.");
             return;
         }
 
         // Can't follow someone who is ordered to follow me - release them first.
         if (CurrentFollowers.Any(f => f.Equals(master, StringComparison.OrdinalIgnoreCase)))
         {
-            Log($"Releasing {master} (can't follow an account that follows me).");
+            Log($"Releasing {master} (can't follow an account that follows me).",
+                "Releasing a butler (can't follow an account that follows me).");
             ToggleFollower(master);
         }
 
@@ -359,7 +362,8 @@ public class ButlerV5Plugin : ISkuaPlugin
     public void OrderFollowers(IEnumerable<string> usernames)
     {
         _broadcaster?.SetFollowers(usernames);
-        Log("Ordered to follow me: " + string.Join(", ", CurrentFollowers));
+        Log("Ordered to follow me: " + string.Join(", ", CurrentFollowers),
+            $"Ordered to follow me: {CurrentFollowers.Count} account(s).");
     }
 
     /// <summary>Add or remove one account from this master's followers list.</summary>
@@ -376,13 +380,15 @@ public class ButlerV5Plugin : ISkuaPlugin
             // Can't summon anyone while I'm a butler myself (conga guard).
             if (FollowingWho is { } iAmFollowing)
             {
-                Log($"Can't summon {username} while following {iAmFollowing} - stop that first.");
+                Log($"Can't summon {username} while following {iAmFollowing} - stop that first.",
+                    "Can't summon a butler while following a master - stop that first.");
                 return;
             }
             // Master switch off = the whole plugin is inert; summoning would do nothing.
             if (!PluginEnabled)
             {
-                Log($"Can't summon {username} - ButlerV5 is disabled ('Enable ButlerV5' is off). Turn it on first.");
+                Log($"Can't summon {username} - ButlerV5 is disabled ('Enable ButlerV5' is off). Turn it on first.",
+                    "Can't summon a butler - ButlerV5 is disabled ('Enable ButlerV5' is off). Turn it on first.");
                 return;
             }
             current.Add(username);
@@ -390,7 +396,8 @@ public class ButlerV5Plugin : ISkuaPlugin
 
         DebugLog.Log("UI", $"ToggleFollower({username}) -> {(index >= 0 ? "release" : "summon")}, list now [{string.Join(",", current)}]");
         _broadcaster?.SetFollowers(current);
-        Log(index >= 0 ? $"Released {username}." : $"Summoned {username} to follow me.");
+        Log(index >= 0 ? $"Released {username}." : $"Summoned {username} to follow me.",
+            index >= 0 ? "Released a butler." : "Summoned a butler to follow me.");
     }
 
     /// <summary>Order every online plugin account to follow this one.</summary>
@@ -401,7 +408,8 @@ public class ButlerV5Plugin : ISkuaPlugin
         // I can't summon anyone while I'm a butler myself (conga guard).
         if (FollowingWho is { } iAmFollowing)
         {
-            Log($"Can't summon while following {iAmFollowing} - stop that first.");
+            Log($"Can't summon while following {iAmFollowing} - stop that first.",
+                "Can't summon while following a master - stop that first.");
             return;
         }
 
@@ -438,7 +446,8 @@ public class ButlerV5Plugin : ISkuaPlugin
         List<string> online = roster.Where(d => !Unavailable(d)).Select(d => d.Username).ToList();
 
         if (skipped.Count > 0)
-            Log("Skipped (script / already following me / following another / is a master / different server / parking): " + string.Join(", ", skipped));
+            Log("Skipped (script / already following me / following another / is a master / different server / parking): " + string.Join(", ", skipped),
+                $"Skipped {skipped.Count} unavailable account(s) (script / following / is a master / different server / parking).");
         if (online.Count == 0)
         {
             Log("No available butlers to summon.");
@@ -449,7 +458,8 @@ public class ButlerV5Plugin : ISkuaPlugin
         if (FollowingWho is { } master &&
             online.Any(u => u.Equals(master, StringComparison.OrdinalIgnoreCase)))
         {
-            Log($"Stopped following {master} (summoning everyone).");
+            Log($"Stopped following {master} (summoning everyone).",
+                "Stopped following the master (summoning everyone).");
             _follower?.Stop();
         }
 
@@ -459,7 +469,8 @@ public class ButlerV5Plugin : ISkuaPlugin
         List<string> finalList = CurrentFollowers.Concat(online)
             .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         _broadcaster?.SetFollowers(finalList);
-        Log("Summoned all: " + string.Join(", ", online.Count > 0 ? online : new[] { "(nobody new available)" }));
+        Log("Summoned all: " + string.Join(", ", online.Count > 0 ? online : new[] { "(nobody new available)" }),
+            $"Summoned all: {online.Count} account(s).");
     }
 
     public void ReleaseFollowers()
@@ -486,7 +497,8 @@ public class ButlerV5Plugin : ISkuaPlugin
         }
         catch (Exception ex)
         {
-            Log($"Could not save setting {name}: {ex.Message}");
+            Log($"Could not save setting {name}: {ex.Message}",
+                "Could not save a setting. See ButlerV5's debug log for details.");
         }
     }
 
@@ -512,7 +524,8 @@ public class ButlerV5Plugin : ISkuaPlugin
         }
         catch (Exception ex)
         {
-            Log($"Could not open settings: {ex.Message}");
+            Log($"Could not open settings: {ex.Message}",
+                "Could not open settings. See ButlerV5's debug log for details.");
         }
     }
 
@@ -537,7 +550,8 @@ public class ButlerV5Plugin : ISkuaPlugin
         }
         catch (Exception ex)
         {
-            Log($"Could not open window: {ex.Message}");
+            Log($"Could not open window: {ex.Message}",
+                "Could not open window. See ButlerV5's debug log for details.");
         }
     }
 
@@ -755,7 +769,8 @@ public class ButlerV5Plugin : ISkuaPlugin
                     if (d.Declined.Equals(me, StringComparison.OrdinalIgnoreCase) &&
                         CurrentFollowers.Any(f => f.Equals(d.Username, StringComparison.OrdinalIgnoreCase)))
                     {
-                        Log($"{d.Username} declined the summon - released.");
+                        Log($"{d.Username} declined the summon - released.",
+                            "A butler declined the summon - released.");
                         ToggleFollower(d.Username);
                     }
                 }
@@ -895,13 +910,16 @@ public class ButlerV5Plugin : ISkuaPlugin
     }
 
     private void Log(string message)
+        => Log(message, message);
+
+    private void Log(string message, string scriptMessage)
     {
-        // User-facing status: mirror into our own log window / auto-saved file (so it's
-        // visible alongside the diagnostics) AND Skua's own log panel.
+        // Keep diagnostics intact. Callers with account data provide a separate,
+        // anonymous status for Skua; never forward the detailed copy to that log.
         DebugLog.Log("ButlerV5", message);
         try
         {
-            _bot?.Log($"[ButlerV5] {message}");
+            _bot?.Log($"[ButlerV5] {scriptMessage}");
         }
         catch
         {

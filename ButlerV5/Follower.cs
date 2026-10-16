@@ -60,7 +60,8 @@ public class Follower
 
     private readonly IScriptInterface _bot;
     private readonly FollowerSettings _settings;
-    private readonly Action<string> _log;
+    // Detailed diagnostic text first; anonymous Skua script-log status second.
+    private readonly Action<string, string> _log;
 
     private CancellationTokenSource? _cts;
     private Task? _loop;
@@ -119,7 +120,7 @@ public class Follower
     public FollowSource Source { get; private set; } = FollowSource.None;
     public bool IsRunning => _loop is { IsCompleted: false };
 
-    public Follower(IScriptInterface bot, FollowerSettings settings, Action<string> log)
+    public Follower(IScriptInterface bot, FollowerSettings settings, Action<string, string> log)
     {
         _bot = bot;
         _settings = settings;
@@ -158,7 +159,7 @@ public class Follower
             $"options in THIS client: passiveAttack={_settings.PassiveAttack()} leech={_settings.LeechMode()} " +
             $"park={_settings.Park()} gotoDelay={_settings.GotoDelayMs()}ms alwaysGoto={_settings.AlwaysGoto()} rescue={_settings.RescueThreshold()} " +
             $"instantWarnings={_settings.InstantWarnings()} questBypass={_settings.QuestBypasses()} questClone={_settings.QuestClone()}");
-        _log($"Following {master} ({source}).");
+        _log($"Following {master} ({source}).", $"Following the master ({source}).");
 
         _loop = Task.Run(() => Run(master, token), token);
     }
@@ -187,11 +188,12 @@ public class Follower
         // direct join. On release, only skip the house transfer if it is truly home.
         if (park && (!_parked ||
             (_settings.Park() == ParkSpot.House && !IsInOwnHouse(GetMyMapRoom()))))
-            Park("Released by master.");
+            Park("Released by master.", "Released by master.");
         else if (park)
             DebugLog.Log("Follower", "released while already parked - staying put");
 
-        _log(Master != null ? $"Stopped following {Master}." : "Follow stopped.");
+        _log(Master != null ? $"Stopped following {Master}." : "Follow stopped.",
+            Master != null ? "Stopped following the master." : "Follow stopped.");
         Master = null;
         Source = FollowSource.None;
     }
@@ -236,7 +238,8 @@ public class Follower
                         _suspended = true;
                         StopSkills();
                         StopAttacking(deaggroJump: true);
-                        _log($"A script is running - following {master} is suspended until it stops.");
+                        _log($"A script is running - following {master} is suspended until it stops.",
+                            "A script is running - following the master is suspended until it stops.");
                         DebugLog.Log("Follower", "suspended (script running in this client)");
                         try { _settings.ScriptSuspendNotice?.Invoke(master); } catch { }
                     }
@@ -247,7 +250,8 @@ public class Follower
                 {
                     _suspended = false;
                     _gotoAttempts = 0;
-                    _log($"Script stopped - resuming follow of {master}.");
+                    _log($"Script stopped - resuming follow of {master}.",
+                        "Script stopped - resuming follow of the master.");
                     DebugLog.Log("Follower", "resuming after script");
                 }
 
@@ -298,7 +302,10 @@ public class Follower
                         ParkOnce(m == null
                             ? $"No ButlerV5 file for {master} at {SyncFile.PathFor(master)} - is their plugin installed?"
                             : $"{master} looks offline (loggedin={(m.LoggedIn ? 1 : 0)}, pid={m.Pid}, " +
-                              $"pidAlive={SyncFile.IsProcessAlive(m.Pid)}). Parked, waiting for them to return.");
+                              $"pidAlive={SyncFile.IsProcessAlive(m.Pid)}). Parked, waiting for them to return.",
+                            m == null
+                                ? "No ButlerV5 file for the master - is their plugin installed? Parked."
+                                : "The master looks offline. Parked, waiting for them to return.");
                     }
                     Wait(token, 1000);
                     continue;
@@ -322,7 +329,8 @@ public class Follower
 
                 if (!SameServer(m))
                 {
-                    ParkOnce($"{master} is on a different server (theirs='{m.Server}' mine='{GameServer.CurrentName(_bot)}'). Parked.");
+                    ParkOnce($"{master} is on a different server (theirs='{m.Server}' mine='{GameServer.CurrentName(_bot)}'). Parked.",
+                        "The master is on a different server. Parked.");
                     Wait(token, 2000);
                     continue;
                 }
@@ -356,7 +364,7 @@ public class Follower
                 if (_parked)
                 {
                     _parked = false;
-                    _log($"{master} is back - resuming follow.");
+                    _log($"{master} is back - resuming follow.", "The master is back - resuming follow.");
                     // Don't start skills here - we still have to travel to the master.
                     // HandleCombat starts them on arrival (avoids the start-stop-start
                     // that breaks Skua's skill engine).
@@ -386,7 +394,8 @@ public class Follower
                             _blockedRoom = m.MapWithRoom;
                             _roomFullAttempts = 0;
                             _fullCountRoom = null;
-                            ParkOnce($"{m.MapWithRoom} is full after 3 attempts - parked until {master} changes rooms.");
+                            ParkOnce($"{m.MapWithRoom} is full after 3 attempts - parked until {master} changes rooms.",
+                                "The master's room is full after 3 attempts - parked until the master changes rooms.");
                             Wait(token, 2000);
                             continue;
                         }
@@ -394,7 +403,10 @@ public class Follower
 
                     _log(full
                         ? $"Room full - joining {m.MapWithRoom} directly (attempt {_roomFullAttempts})."
-                        : $"Locked zone - joining {m.MapWithRoom} from {master}'s file.");
+                        : $"Locked zone - joining {m.MapWithRoom} from {master}'s file.",
+                        full
+                            ? $"Room full - joining the master's room directly (attempt {_roomFullAttempts})."
+                            : "Locked zone - joining the master's room from their file.");
                     JoinMasterRoom(m, token);
                     Wait(token, LoopDelayMs);
                     continue;
@@ -493,12 +505,16 @@ public class Follower
                                 _blockedRoom = m.MapWithRoom;
                                 ParkOnce(m.Map.Equals("house", StringComparison.OrdinalIgnoreCase)
                                     ? $"Can't reach {master} in {m.MapWithRoom} through their own house - they may be visiting someone else's house. Parked until they change rooms."
-                                    : $"Can't enter {m.MapWithRoom} after 3 direct joins - parked until {master} changes rooms.");
+                                    : $"Can't enter {m.MapWithRoom} after 3 direct joins - parked until {master} changes rooms.",
+                                    m.Map.Equals("house", StringComparison.OrdinalIgnoreCase)
+                                        ? "Can't reach the master through their own house - they may be visiting someone else's house. Parked until they change rooms."
+                                        : "Can't enter the master's room after 3 direct joins - parked until the master changes rooms.");
                             }
                             else
                             {
                                 _blockedMap = m.Map;
-                                ParkOnce($"Can't enter {m.Map} after 3 direct joins - parked until {master} changes maps.");
+                                ParkOnce($"Can't enter {m.Map} after 3 direct joins - parked until {master} changes maps.",
+                                    "Can't enter the master's map after 3 direct joins - parked until the master changes maps.");
                             }
                             Wait(token, 2000);
                             continue;
@@ -542,12 +558,14 @@ public class Follower
                                 if (onMasterMap)
                                 {
                                     _blockedRoom = m.MapWithRoom;
-                                    ParkOnce($"{m.MapWithRoom} is full after 3 rescue attempts - parked until {master} changes rooms.");
+                                    ParkOnce($"{m.MapWithRoom} is full after 3 rescue attempts - parked until {master} changes rooms.",
+                                        "The master's room is full after 3 rescue attempts - parked until the master changes rooms.");
                                 }
                                 else
                                 {
                                     _blockedMap = m.Map;
-                                    ParkOnce($"Can't enter {m.Map} after 3 rescue attempts - a quest gate may be missing. Parked until {master} changes maps.");
+                                    ParkOnce($"Can't enter {m.Map} after 3 rescue attempts - a quest gate may be missing. Parked until {master} changes maps.",
+                                        "Can't enter the master's map after 3 rescue attempts - a quest gate may be missing. Parked until the master changes maps.");
                                 }
                                 Wait(token, 2000);
                                 continue;
@@ -632,7 +650,8 @@ public class Follower
         }
         catch (Exception ex)
         {
-            _log($"Follow loop error: {ex.Message}");
+            _log($"Follow loop error: {ex.Message}",
+                "Follow loop error. See ButlerV5's debug log for details.");
         }
     }
 
@@ -894,7 +913,8 @@ public class Follower
             {
                 classToEquip = AccountConfig.GetCboClassName(me, type);
                 if (string.IsNullOrEmpty(classToEquip))
-                    _log($"No CoreBots {type} class configured for {me} - keeping current class.");
+                    _log($"No CoreBots {type} class configured for {me} - keeping current class.",
+                        $"No CoreBots {type} class configured for this account - keeping current class.");
                 else if (Enum.TryParse(AccountConfig.GetCboClassMode(me, type), ignoreCase: true, out ClassUseMode mode))
                     _skillMode = mode;
             }
@@ -908,7 +928,7 @@ public class Follower
 
             if (!string.IsNullOrEmpty(classToEquip))
             {
-                _log($"Equipping class: {classToEquip}");
+                _log($"Equipping class: {classToEquip}", $"Equipping class: {classToEquip}");
                 _bot.Inventory.EquipItem(classToEquip);
 
                 // Poll for the equip to actually take (this also serves as the settle
@@ -936,7 +956,8 @@ public class Follower
                 else
                 {
                     string? worn = _bot.Player?.CurrentClass?.Name;
-                    _log($"Couldn't equip '{classToEquip}' - not in {me}'s inventory? Keeping current class ({worn ?? "unknown"}).");
+                    _log($"Couldn't equip '{classToEquip}' - not in {me}'s inventory? Keeping current class ({worn ?? "unknown"}).",
+                        $"Couldn't equip '{classToEquip}' - not in this account's inventory? Keeping current class ({worn ?? "unknown"}).");
                     _skillClass = worn;
                 }
             }
@@ -1015,7 +1036,8 @@ public class Follower
                 if (!_autoStopLogged)
                 {
                     _autoStopLogged = true;
-                    _log("Stopped Skua's Auto Attack/Hunt - it conflicts with following; the butler runs combat itself.");
+                    _log("Stopped Skua's Auto Attack/Hunt - it conflicts with following; the butler runs combat itself.",
+                        "Stopped Skua's Auto Attack/Hunt - it conflicts with following; the butler runs combat itself.");
                 }
                 _bot.Auto.Stop();
             }
@@ -1315,7 +1337,8 @@ public class Follower
                         // We entered the master's own house but not their recorded
                         // instance. They may be visiting another player's house.
                         _blockedRoom = m.MapWithRoom;
-                        ParkOnce($"House join reached {currentRoom}, but {m.Username} is in {m.MapWithRoom}. Parked until they change rooms.");
+                        ParkOnce($"House join reached {currentRoom}, but {m.Username} is in {m.MapWithRoom}. Parked until they change rooms.",
+                            "House join reached a different house from the master's room. Parked until they change rooms.");
                         return true;
                     }
                 }
@@ -1340,26 +1363,27 @@ public class Follower
         }
         catch (Exception ex)
         {
-            _log($"Join {m.MapWithRoom} failed: {ex.Message}");
+            _log($"Join {m.MapWithRoom} failed: {ex.Message}",
+                "Joining the master's room failed. See ButlerV5's debug log for details.");
             DebugLog.Log("Follower", $"join {m.MapWithRoom} FAILED: {ex}");
         }
         return true;
     }
 
-    private void ParkOnce(string reason)
+    private void ParkOnce(string reason, string scriptReason)
     {
         if (_parked)
             return;
         _parked = true;
-        Park(reason);
+        Park(reason, scriptReason);
     }
 
-    private void Park(string reason)
+    private void Park(string reason, string scriptReason)
     {
         _isParking = true; // broadcast so the master's window keeps Summon disabled until home
         try
         {
-            _log(reason);
+            _log(reason, scriptReason);
             DebugLog.Log("Follower", $"PARK: {reason}");
             ForceParkingAggroOff();
             StopSkills();
